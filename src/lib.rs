@@ -32,13 +32,23 @@ impl Default for GeminiBuilder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Gemini {
     pub(crate) api_key: String,
     pub(crate) client: reqwest::Client,
     #[cfg(feature = "leaky-bucket")]
     pub(crate) leaky_bucket: Option<Arc<RateLimiter>>,
     pub(crate) api_version: String,
+}
+
+impl fmt::Debug for Gemini {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gemini")
+            .field("api_key", &"[REDACTED]")
+            .field("client", &self.client)
+            .field("api_version", &self.api_version)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Error)]
