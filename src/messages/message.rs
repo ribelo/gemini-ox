@@ -57,15 +57,15 @@ impl Content {
         self
     }
 
-    pub fn push_part<T: Into<Part>>(&mut self, part: T) {
+    pub fn add<T: Into<Part>>(&mut self, part: T) {
         match self {
             Content::Model { parts } | Content::User { parts } => parts.push(part.into()),
         }
     }
 
     #[must_use]
-    pub fn add_part<T: Into<Part>>(mut self, part: T) -> Self {
-        self.push_part(part);
+    pub fn with_part<T: Into<Part>>(mut self, part: T) -> Self {
+        self.add(part);
         self
     }
 
@@ -94,6 +94,16 @@ impl Content {
     pub fn expect_model(&self) -> &Self {
         self.as_model().expect("Expected Content to be Model")
     }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts().is_empty()
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &Part> {
+        self.parts().iter()
+    }
 }
 
 impl FromIterator<Part> for Content {
@@ -104,7 +114,7 @@ impl FromIterator<Part> for Content {
 
 impl From<&'static str> for Content {
     fn from(value: &'static str) -> Self {
-        Self::user().add_part(value)
+        Self::user().with_part(value)
     }
 }
 
@@ -332,8 +342,12 @@ impl Parts {
         self.len() == 0
     }
 
-    pub fn push(&mut self, part: Part) {
-        self.0.push(part);
+    pub fn push<T: Into<Part>>(&mut self, part: T) {
+        self.0.push(part.into());
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Part> {
+        self.0.iter()
     }
 
     pub fn get_function_calls(&self) -> Vec<&FunctionCall> {

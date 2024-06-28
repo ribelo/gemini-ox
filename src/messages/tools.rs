@@ -33,13 +33,13 @@ impl fmt::Debug for Tool {
 impl Tool {
     // Make new tool. Tool needs to know what kind of stuff it works with.
     #[must_use]
-    pub fn builder<T: JsonSchema>() -> ToolBuilder {
+    pub fn builder() -> ToolBuilder {
         ToolBuilder::default()
     }
 
     // Use tool on something.
     #[must_use]
-    pub fn call(&self, input: serde_json::Value, cx: ToolContext) -> Option<FunctionResponse> {
+    pub fn invoke(&self, input: serde_json::Value, cx: ToolContext) -> Option<FunctionResponse> {
         // If tool has a way to do things...
         if let Some(handler) = &self.handler {
             // ...try to do the thing.
@@ -96,9 +96,9 @@ impl ToolBuilder {
     #[must_use]
     pub fn handler<H, T, R>(mut self, handler: H) -> Self
     where
-        H: ToolHandler<T, R> + 'static,
-        T: JsonSchema + DeserializeOwned + 'static,
-        R: Serialize + 'static,
+        H: ToolHandler<T, R> + Send + Sync + 'static,
+        T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
+        R: Serialize + Send + Sync + 'static,
     {
         let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
             s.inline_subschemas = true;
@@ -115,6 +115,24 @@ impl ToolBuilder {
             phantom: PhantomData,
         };
         self.handler = Some(Arc::new(wrapper));
+        self
+    }
+
+    #[must_use]
+    pub fn props<T>(mut self) -> Self
+    where
+        T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
+    {
+        let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
+            s.inline_subschemas = true;
+            s.meta_schema = None;
+        });
+        let gen = schemars::gen::SchemaGenerator::new(settings);
+        let json_schema = gen.into_root_schema_for::<T>();
+        let mut parameters = serde_json::to_value(json_schema).unwrap();
+        parameters.as_object_mut().unwrap().remove("title").unwrap();
+        self.parameters = Some(parameters);
+
         self
     }
 
@@ -141,7 +159,7 @@ impl ToolBuilder {
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
-    resources: Arc<Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
+    pub resources: Arc<Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
 }
 
 impl ToolContext {
@@ -211,14 +229,14 @@ impl Serialize for Tools {
 }
 
 impl Tools {
-    pub fn push<T: Into<Tool>>(&mut self, tool: T) {
+    pub fn add<T: Into<Tool>>(&mut self, tool: T) {
         let tool = tool.into();
         self.tools.insert(tool.name.clone(), tool);
     }
 
     #[must_use]
-    pub fn add_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
-        self.push(tool);
+    pub fn with_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
+        self.add(tool);
         self
     }
 
@@ -228,9 +246,9 @@ impl Tools {
     }
 
     #[must_use]
-    pub fn call(&self, function_call: &FunctionCall) -> Option<FunctionResponse> {
+    pub fn invoke(&self, function_call: &FunctionCall) -> Option<FunctionResponse> {
         if let Some(tool) = self.get_tool(&function_call.name) {
-            tool.call(
+            tool.invoke(
                 function_call
                     .args
                     .as_ref()
@@ -247,11 +265,21 @@ impl Tools {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    pub fn push_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
+        self.context.push_resource(resource);
+    }
+
+    #[must_use]
+    pub fn with_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
+        self.context.push_resource(resource);
+        self
+    }
 }
 
 impl From<Tool> for Tools {
     fn from(tool: Tool) -> Self {
-        Tools::default().add_tool(tool)
+        Tools::default().with_tool(tool)
     }
 }
 
@@ -259,7 +287,7 @@ impl From<Vec<Tool>> for Tools {
     fn from(tools: Vec<Tool>) -> Self {
         let mut tools_map = Tools::default();
         for tool in tools {
-            tools_map.push(tool);
+            tools_map.add(tool);
         }
         tools_map
     }
@@ -272,7 +300,7 @@ pub struct HandlerError {
 }
 
 impl HandlerError {
-    pub fn new<T: std::error::Error>(e: T) -> Self {
+    pub fn new<T: ToString>(e: T) -> Self {
         Self {
             error: e.to_string(),
         }
@@ -293,7 +321,7 @@ where
     }
 }
 
-pub trait ErasedToolHandler {
+pub trait ErasedToolHandler: Send + Sync {
     fn call(
         &self,
         input: serde_json::Value,
@@ -312,9 +340,9 @@ where
 
 impl<H, T, R> ErasedToolHandler for ToolHandlerWrapper<H, T, R>
 where
-    H: ToolHandler<T, R>,
-    T: JsonSchema + DeserializeOwned,
-    R: Serialize,
+    H: ToolHandler<T, R> + Send + Sync,
+    T: JsonSchema + DeserializeOwned + Send + Sync,
+    R: Serialize + Send + Sync,
 {
     fn call(
         &self,
@@ -329,6 +357,80 @@ where
             error: e.to_string(),
         })
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename = "camelCase")]
+pub struct ToolConfig {
+    /// Function calling config.
+    function_calling_config: Option<FunctionCallingConfig>,
+}
+
+impl ToolConfig {
+    /// Set the function calling config.
+    #[must_use]
+    pub fn function_calling_config(
+        mut self,
+        function_calling_config: FunctionCallingConfig,
+    ) -> Self {
+        self.function_calling_config = Some(function_calling_config);
+        self
+    }
+
+    #[must_use]
+    pub fn mode(self, mode: Mode) -> Self {
+        let fcc = FunctionCallingConfig::default().mode(mode);
+        self.function_calling_config(fcc)
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename = "camelCase")]
+pub struct FunctionCallingConfig {
+    /// Specifies the mode in which function calling should execute.
+    mode: Option<Mode>,
+    /// A set of function names that, when provided, limits the functions the model will call.
+    allowed_function_names: Option<Vec<String>>,
+}
+
+impl FunctionCallingConfig {
+    /// Create a new FunctionCallingConfig with default values.
+    pub fn new() -> Self {
+        Self {
+            mode: None,
+            allowed_function_names: None,
+        }
+    }
+
+    /// Set the function calling mode.
+    pub fn mode(mut self, mode: Mode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Set the allowed function names.
+    pub fn allowed_function_names(mut self, allowed_function_names: Vec<String>) -> Self {
+        self.allowed_function_names = Some(allowed_function_names);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename = "camelCase")]
+pub enum Mode {
+    /// Unspecified function calling mode. This value should not be used.
+    ModeUnspecified,
+    /// Default model behavior, model decides to predict either a function call or a natural
+    /// language response.
+    Auto,
+    /// Model is constrained to always predicting a function call only. If
+    /// "allowedFunctionNames" are set, the predicted function call will be limited to any
+    /// one of "allowedFunctionNames", else the predicted function call will be any one of
+    /// the provided "functionDeclarations".
+    Any,
+    /// Model will not predict any function call. Model behavior is same as when not passing
+    /// any function declarations.
+    None,
 }
 
 #[cfg(test)]
@@ -363,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_tool_builder() {
-        let tool = Tool::builder::<TestParams>()
+        let tool = Tool::builder()
             .name("test_tool".to_string())
             .description("This is a test tool.".to_string())
             .handler(|params: TestParams, _cx: &ToolContext| {
@@ -473,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_tool_call() {
-        let tool = Tool::builder::<TestParams>()
+        let tool = Tool::builder()
             .name("test_tool".to_string())
             .description("This is a test tool.".to_string())
             .handler(test_tool_handler)
@@ -487,7 +589,7 @@ mod tests {
 
         let cx = ToolContext::default();
 
-        let response = tool.call(input, cx).unwrap();
+        let response = tool.invoke(input, cx).unwrap();
 
         assert_eq!(response.name, "test_tool");
         assert_eq!(
@@ -514,7 +616,7 @@ mod tests {
             }
         }
 
-        let tool = Tool::builder::<TestParams>()
+        let tool = Tool::builder()
             .name("error_tool".to_string())
             .description("This tool always returns an error.")
             .handler(ErrorToolHandler)
@@ -528,7 +630,7 @@ mod tests {
 
         let cx = ToolContext::default();
 
-        let response = tool.call(input, cx).unwrap();
+        let response = tool.invoke(input, cx).unwrap();
 
         assert_eq!(response.name, "error_tool");
         assert_eq!(

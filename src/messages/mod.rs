@@ -1,11 +1,11 @@
-use message::{Content, Contents};
+use message::{Content, Contents, FunctionCall, Part, Parts};
 use reqwest_eventsource::{Event, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::{Stream, StreamExt};
-use tools::{Tool, Tools};
+use tools::{Tool, ToolConfig, Tools};
 
-use crate::{Gemini, GenerationConfig, SafetyRating, SafetySettings, SystemInstruction, BASE_URL};
+use crate::{Gemini, GenerationConfig, SafetyRating, SafetySettings, BASE_URL};
 
 pub mod message;
 pub mod tools;
@@ -18,7 +18,7 @@ pub struct GenerateContentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     safety_settings: Option<SafetySettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<SystemInstruction>,
+    system_instruction: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GenerationConfig>,
     model: String,
@@ -40,8 +40,9 @@ pub enum GenerateContentRequestBuilderError {
 pub struct GenerateContentRequestBuilder {
     contents: Option<Contents>,
     tools: Option<Tools>,
+    tool_config: Option<ToolConfig>,
     safety_settings: SafetySettings,
-    system_instruction: Option<SystemInstruction>,
+    system_instruction: Option<Content>,
     generation_config: Option<GenerationConfig>,
     model: Option<String>,
     gemini: Gemini,
@@ -52,6 +53,7 @@ impl GenerateContentRequestBuilder {
         GenerateContentRequestBuilder {
             contents: None,
             tools: None,
+            tool_config: None,
             safety_settings: SafetySettings::default(),
             system_instruction: None,
             generation_config: None,
@@ -86,9 +88,15 @@ impl GenerateContentRequestBuilder {
     }
 
     #[must_use]
+    pub fn tool_config<T: Into<ToolConfig>>(mut self, cfg: T) -> Self {
+        self.tool_config = Some(cfg.into());
+        self
+    }
+
+    #[must_use]
     pub fn add_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
         let mut tools = self.tools.take().unwrap_or_default();
-        tools.push(tool);
+        tools.add(tool);
         self.tools = Some(tools);
         self
     }
@@ -105,8 +113,8 @@ impl GenerateContentRequestBuilder {
     ///
     /// * `system_instruction` - The system instruction for the request.
     #[must_use]
-    pub fn system_instruction(mut self, system_instruction: SystemInstruction) -> Self {
-        self.system_instruction = Some(system_instruction);
+    pub fn system_instruction<T: Into<Content>>(mut self, system_instruction: T) -> Self {
+        self.system_instruction = Some(system_instruction.into());
         self
     }
 
@@ -248,14 +256,37 @@ pub struct GenerateContentResponse {
 
 impl GenerateContentResponse {
     #[must_use]
-    pub fn call_functions(&self, tools: &Tools) -> Content {
+    pub fn content(&self) -> Option<&Content> {
+        self.candidates.first().map(|c| &c.content)
+    }
+    #[must_use]
+    pub fn get_function_calls(&self) -> Vec<&FunctionCall> {
+        self.content()
+            .map(|c| c.parts().get_function_calls())
+            .unwrap_or_default()
+    }
+    #[must_use]
+    pub fn invoke_functions(&self, tools: &Tools) -> Content {
         let mut content = Content::user();
-        for fc in self.candidates[0].content.parts().get_function_calls() {
-            if let Some(res) = tools.call(fc) {
-                content.push_part(res);
+        for fc in self.get_function_calls() {
+            if let Some(res) = tools.invoke(fc) {
+                content.add(res);
             }
         }
         content
+    }
+}
+
+impl From<GenerateContentResponse> for Content {
+    fn from(value: GenerateContentResponse) -> Self {
+        let parts: Parts = value.candidates[0].content.parts().clone();
+        Content::Model { parts }
+    }
+}
+
+impl From<GenerateContentResponse> for Parts {
+    fn from(value: GenerateContentResponse) -> Self {
+        value.candidates[0].content.parts().clone()
     }
 }
 
@@ -287,7 +318,7 @@ pub struct PromptFeedback {
 #[serde(rename_all = "camelCase")]
 pub struct UsageMetadata {
     pub prompt_token_count: u32,
-    pub candidates_token_count: u32,
+    pub candidates_token_count: Option<u32>,
     pub total_token_count: u32,
 }
 
@@ -346,16 +377,16 @@ mod tests {
         let api_key = std::env::var("GEMINI_API_KEY").unwrap();
         let gemini = Gemini::builder().api_key(api_key).build().unwrap();
         let tools = Tools::default()
-            .add_tool(
-                Tool::builder::<()>()
+            .with_tool(
+                Tool::builder()
                     .name("test_function_1")
                     .description("use this to finish this test")
                     .handler(test_handler_1)
                     .build()
                     .unwrap(),
             )
-            .add_tool(
-                Tool::builder::<()>()
+            .with_tool(
+                Tool::builder()
                     .name("test_function_2")
                     .description("use this to finish this test")
                     .handler(test_handler_2)
@@ -376,6 +407,6 @@ mod tests {
             .unwrap();
 
         dbg!(&res);
-        res.call_functions(&tools);
+        res.invoke_functions(&tools);
     }
 }

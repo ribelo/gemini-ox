@@ -8,12 +8,10 @@ use thiserror::Error;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "leaky-bucket")] {
-        use std::sync::Arc;
-        pub use leaky_bucket::RateLimiter;
-    }
-}
+#[cfg(feature = "leaky-bucket")]
+pub use leaky_bucket::RateLimiter;
+#[cfg(feature = "leaky-bucket")]
+use std::sync::Arc;
 
 pub struct GeminiBuilder {
     api_key: Option<String>,
@@ -108,10 +106,6 @@ impl GeminiBuilder {
         })
     }
 }
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemInstruction(Content);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SafetySettings(Vec<SafetySetting>);
