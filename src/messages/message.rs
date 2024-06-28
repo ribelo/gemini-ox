@@ -118,6 +118,12 @@ impl From<&'static str> for Content {
     }
 }
 
+impl From<String> for Content {
+    fn from(value: String) -> Self {
+        Self::user().with_part(value)
+    }
+}
+
 impl Extend<Part> for Content {
     fn extend<T: IntoIterator<Item = Part>>(&mut self, iter: T) {
         match self {

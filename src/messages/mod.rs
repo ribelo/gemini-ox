@@ -244,6 +244,10 @@ impl GenerateContentRequest {
 
         tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
     }
+
+    pub fn add_content<T: Into<Content>>(&mut self, content: T) {
+        self.contents.push(content.into());
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
