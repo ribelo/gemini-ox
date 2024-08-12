@@ -26,6 +26,7 @@ impl Default for GeminiBuilder {
         Self {
             api_key: None,
             client: None,
+            #[cfg(feature = "leaky-bucket")]
             leaky_bucket: None,
             api_version: String::from("v1beta"),
         }
@@ -62,37 +63,30 @@ impl Gemini {
     pub fn builder() -> GeminiBuilder {
         GeminiBuilder::default()
     }
-
-    // pub fn messages(&self) -> MessagesRequestBuilder {
-    //     MessagesRequestBuilder {
-    //         client: Some(self.clone()),
-    //         ..Default::default()
-    //     }
-    // }
 }
 
 impl GeminiBuilder {
     #[must_use]
-    pub fn api_key<T: Into<String>>(mut self, api_key: T) -> GeminiBuilder {
+    pub fn with_api_key<T: Into<String>>(mut self, api_key: T) -> GeminiBuilder {
         self.api_key = Some(api_key.into());
         self
     }
 
     #[must_use]
-    pub fn api_version<T: Into<String>>(mut self, api_version: T) -> GeminiBuilder {
+    pub fn with_api_version<T: Into<String>>(mut self, api_version: T) -> GeminiBuilder {
         self.api_version = api_version.into();
         self
     }
 
     #[must_use]
-    pub fn client(mut self, client: &reqwest::Client) -> GeminiBuilder {
+    pub fn with_client(mut self, client: &reqwest::Client) -> GeminiBuilder {
         self.client = Some(client.clone());
         self
     }
 
     #[cfg(feature = "leaky-bucket")]
     #[must_use]
-    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> GeminiBuilder {
+    pub fn with_limiter(mut self, leaky_bucket: RateLimiter) -> GeminiBuilder {
         self.leaky_bucket = Some(leaky_bucket);
         self
     }
@@ -151,19 +145,19 @@ impl Default for SafetySettings {
             //     HarmCategory::HarmCategoryDangerous,
             //     HarmBlockThreshold::BlockNone,
             // )
-            .category(
+            .with_category(
                 HarmCategory::HarmCategoryHarassment,
                 HarmBlockThreshold::BlockNone,
             )
-            .category(
+            .with_category(
                 HarmCategory::HarmCategoryHateSpeech,
                 HarmBlockThreshold::BlockNone,
             )
-            .category(
+            .with_category(
                 HarmCategory::HarmCategorySexuallyExplicit,
                 HarmBlockThreshold::BlockNone,
             )
-            .category(
+            .with_category(
                 HarmCategory::HarmCategoryDangerousContent,
                 HarmBlockThreshold::BlockNone,
             )
@@ -172,7 +166,7 @@ impl Default for SafetySettings {
 
 impl SafetySettings {
     #[must_use]
-    pub fn category(mut self, category: HarmCategory, threshold: HarmBlockThreshold) -> Self {
+    pub fn with_category(mut self, category: HarmCategory, threshold: HarmBlockThreshold) -> Self {
         self.0.push((category, threshold).into());
         self
     }
@@ -480,16 +474,17 @@ pub enum ApiRequestError {
     ReqwestError(#[from] reqwest::Error),
     #[error(transparent)]
     SerdeError(#[from] serde_json::Error),
-
     #[error("Invalid request error: {message}")]
     InvalidRequestError {
-        message: String,
-        param: Option<String>,
         code: Option<String>,
-        status: reqwest::StatusCode,
+        details: serde_json::Value,
+        message: String,
+        status: Option<String>,
     },
     #[error("Unexpected response from API: {response}")]
     UnexpectedResponse { response: String },
-    #[error("Rate limit error")]
-    RateLimitError,
+    #[error("Invalid event data: {0}")]
+    InvalidEventData(String),
+    #[error("Rate limit exceeded")]
+    RateLimit,
 }

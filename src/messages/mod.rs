@@ -1,11 +1,10 @@
-use message::{Content, Contents, FunctionCall, Part, Parts};
-use reqwest_eventsource::{Event, RequestBuilderExt};
+use futures::{Stream, StreamExt};
+use message::{Content, Contents, FunctionCall, Parts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::{Stream, StreamExt};
 use tools::{Tool, ToolConfig, Tools};
 
-use crate::{Gemini, GenerationConfig, SafetyRating, SafetySettings, BASE_URL};
+use crate::{ApiRequestError, Gemini, GenerationConfig, SafetyRating, SafetySettings, BASE_URL};
 
 pub mod message;
 pub mod tools;
@@ -26,10 +25,8 @@ pub struct GenerateContentRequest {
     gemini: Gemini,
 }
 
-/// Possible errors during the construction of `GenerateContentRequest`.
 #[derive(Debug, thiserror::Error)]
 pub enum GenerateContentRequestBuilderError {
-    /// Indicates that no content was provided for the request.
     #[error("Content is required for GenerateContentRequest")]
     MissingContent,
     #[error("Model is required for GenerateContentRequest")]
@@ -49,6 +46,7 @@ pub struct GenerateContentRequestBuilder {
 }
 
 impl GenerateContentRequestBuilder {
+    #[must_use]
     pub fn new(gemini: Gemini) -> Self {
         GenerateContentRequestBuilder {
             contents: None,
@@ -62,13 +60,13 @@ impl GenerateContentRequestBuilder {
         }
     }
     #[must_use]
-    pub fn contents<T: Into<Contents>>(mut self, contents: T) -> Self {
+    pub fn with_contents<T: Into<Contents>>(mut self, contents: T) -> Self {
         self.contents = Some(contents.into());
         self
     }
 
     #[must_use]
-    pub fn add_content<T: Into<Content>>(mut self, content: T) -> Self {
+    pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
         let mut messages = self.contents.take().unwrap_or_default();
         messages.push(content);
         self.contents = Some(messages);
@@ -76,25 +74,19 @@ impl GenerateContentRequestBuilder {
     }
 
     #[must_use]
-    pub fn model<T: Into<String>>(mut self, model: T) -> Self {
+    pub fn with_model<T: Into<String>>(mut self, model: T) -> Self {
         self.model = Some(model.into());
         self
     }
 
     #[must_use]
-    pub fn tools<T: Into<Tools>>(mut self, tools: T) -> Self {
+    pub fn with_tools<T: Into<Tools>>(mut self, tools: T) -> Self {
         self.tools = Some(tools.into());
         self
     }
 
     #[must_use]
-    pub fn tool_config<T: Into<ToolConfig>>(mut self, cfg: T) -> Self {
-        self.tool_config = Some(cfg.into());
-        self
-    }
-
-    #[must_use]
-    pub fn add_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
+    pub fn with_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
         let mut tools = self.tools.take().unwrap_or_default();
         tools.add(tool);
         self.tools = Some(tools);
@@ -102,29 +94,25 @@ impl GenerateContentRequestBuilder {
     }
 
     #[must_use]
-    pub fn safety_settings(mut self, safety_settings: SafetySettings) -> Self {
+    pub fn with_tool_config<T: Into<ToolConfig>>(mut self, cfg: T) -> Self {
+        self.tool_config = Some(cfg.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_safety_settings(mut self, safety_settings: SafetySettings) -> Self {
         self.safety_settings = safety_settings;
         self
     }
 
-    /// Sets the system instruction for the request.
-    ///
-    /// # Arguments
-    ///
-    /// * `system_instruction` - The system instruction for the request.
     #[must_use]
-    pub fn system_instruction<T: Into<Content>>(mut self, system_instruction: T) -> Self {
+    pub fn with_system_instruction<T: Into<Content>>(mut self, system_instruction: T) -> Self {
         self.system_instruction = Some(system_instruction.into());
         self
     }
 
-    /// Sets the generation configuration for the request.
-    ///
-    /// # Arguments
-    ///
-    /// * `generation_config` - The generation configuration for the request.
     #[must_use]
-    pub fn generation_config(mut self, generation_config: GenerationConfig) -> Self {
+    pub fn with_generation_config(mut self, generation_config: GenerationConfig) -> Self {
         self.generation_config = Some(generation_config);
         self
     }
@@ -151,23 +139,6 @@ impl GenerateContentRequestBuilder {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum GenerateContentRequestError {
-    #[error(transparent)]
-    ReqwestError(#[from] reqwest::Error),
-    #[error(transparent)]
-    SerdeError(#[from] serde_json::Error),
-    #[error("Invalid request error: {message}")]
-    InvalidRequestError {
-        code: Option<String>,
-        details: serde_json::Value,
-        message: String,
-        status: Option<String>,
-    },
-    #[error(transparent)]
-    EventSourceError(#[from] reqwest_eventsource::Error),
-}
-
 impl Gemini {
     #[must_use]
     pub fn generate_content(&self) -> GenerateContentRequestBuilder {
@@ -176,24 +147,22 @@ impl Gemini {
 }
 
 impl GenerateContentRequest {
-    pub async fn send(&self) -> Result<GenerateContentResponse, GenerateContentRequestError> {
-        // Create the request URL.
+    pub async fn send(&self) -> Result<GenerateContentResponse, ApiRequestError> {
         let url = format!(
             "{}/{}/models/{}:generateContent?key={}",
             BASE_URL, self.gemini.api_version, self.model, self.gemini.api_key
         );
-        // Send the request.
         let res = self.gemini.client.post(&url).json(self).send().await?;
 
-        // Check the status code.
         match res.status().as_u16() {
             200 | 201 => {
                 let data: GenerateContentResponse = res.json().await?;
                 Ok(data)
             }
-            _status => {
+            429 => Err(ApiRequestError::RateLimit),
+            _ => {
                 let mut e: Value = res.json().await?;
-                Err(GenerateContentRequestError::InvalidRequestError {
+                Err(ApiRequestError::InvalidRequestError {
                     code: e["error"]["code"].as_str().map(String::from),
                     details: e["error"]["details"].take(),
                     message: e["error"]["message"]
@@ -204,45 +173,39 @@ impl GenerateContentRequest {
             }
         }
     }
-    pub fn stream(
+
+    pub async fn stream(
         &self,
-    ) -> impl Stream<Item = Result<GenerateContentResponse, GenerateContentRequestError>> {
-        // Create the request URL.
+    ) -> impl Stream<Item = Result<GenerateContentResponse, ApiRequestError>> {
         let url = format!(
             "{}/{}/models/{}:streamGenerateContent?alt=sse&key={}",
             BASE_URL, self.gemini.api_version, self.model, self.gemini.api_key
         );
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut es = self
+
+        let stream = self
             .gemini
             .client
             .post(&url)
             .json(self)
-            .eventsource()
-            .unwrap();
+            .send()
+            .await
+            .unwrap()
+            .bytes_stream();
 
-        tokio::spawn(async move {
-            while let Some(event) = es.next().await {
-                match event {
-                    Ok(Event::Open) => {}
-                    Ok(Event::Message(msg)) => {
-                        let res = serde_json::from_str::<GenerateContentResponse>(&msg.data)
-                            .map_err(GenerateContentRequestError::SerdeError);
-                        tx.send(res).unwrap();
+        stream.map(|chunk| {
+            chunk
+                .map_err(ApiRequestError::ReqwestError)
+                .and_then(|bytes| {
+                    let data = String::from_utf8(bytes.to_vec()).unwrap();
+                    if data.starts_with("data: ") {
+                        let json_data = data.trim_start_matches("data: ");
+                        serde_json::from_str::<GenerateContentResponse>(json_data)
+                            .map_err(ApiRequestError::SerdeError)
+                    } else {
+                        Err(ApiRequestError::InvalidEventData(data))
                     }
-                    Err(err) => {
-                        if matches!(err, reqwest_eventsource::Error::StreamEnded) {
-                            es.close();
-                            break;
-                        }
-                        tx.send(Err(GenerateContentRequestError::EventSourceError(err)))
-                            .unwrap();
-                    }
-                }
-            }
-        });
-
-        tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+                })
+        })
     }
 
     pub fn add_content<T: Into<Content>>(&mut self, content: T) {
@@ -328,58 +291,92 @@ pub struct UsageMetadata {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use schemars::JsonSchema;
     use serde::Deserialize;
-    use tokio_stream::StreamExt;
 
-    use crate::{
-        messages::{
-            message::Content,
-            tools::{HandlerError, Tool, ToolContext, Tools},
-        },
-        Gemini,
-    };
+    use tools::{HandlerError, ToolContext};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
 
-    #[tokio::test]
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn get_api_key() -> String {
+        std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set")
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn get_api_key() -> String {
+        std::env!("GEMINI_API_KEY").to_string()
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_generate_content_request() {
-        let api_key = std::env::var("GEMINI_API_KEY").unwrap();
-        let gemini = Gemini::builder().api_key(api_key).build().unwrap();
-        let mut stream = gemini
-            .generate_content()
-            .add_content(Content::from("hello"))
-            .model("gemini-1.5-flash")
-            .build()
-            .unwrap()
-            .stream();
+        #[cfg(target_arch = "wasm32")]
+        let api_key = get_api_key();
+        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
+        let mut stream = Box::pin(
+            gemini
+                .generate_content()
+                .with_content(Content::from("hello"))
+                .with_model("gemini-1.5-flash")
+                .build()
+                .unwrap()
+                .stream()
+                .await,
+        );
 
-        while let Some(item) = stream.next().await {
-            dbg!(&item.unwrap().candidates[0].content.parts()[0]
-                .as_text()
-                .unwrap());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            while let Some(item) = stream.next().await {
+                let content = item.unwrap().candidates[0].content.parts()[0].clone();
+                if let Some(text) = content.as_text() {
+                    println!("Response: {text}");
+                }
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut responses = Vec::new();
+                while let Some(Ok(response)) = stream.next().await {
+                    let content = &response.candidates[0].content.parts()[0];
+                    if let Some(text) = content.as_text() {
+                        responses.push(text.to_string());
+                    }
+                }
+                assert!(!responses.is_empty());
+            });
         }
     }
 
-    #[tokio::test]
+    #[derive(Debug, Clone, Copy, JsonSchema, Deserialize)]
+    struct TestProps {
+        #[schemars(description = "random number")]
+        x: i32,
+        #[schemars(description = "random number")]
+        y: i32,
+    }
+
+    fn test_handler_1(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
+        println!("inside_handler 1 {:?}", props);
+        Ok(())
+    }
+
+    fn test_handler_2(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
+        println!("inside_handler 2 {:?}", props);
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_function_calling() {
-        #[derive(Debug, JsonSchema, Deserialize)]
-        struct TestProps {
-            #[schemars(description = "random number")]
-            x: i32,
-            #[schemars(description = "random number")]
-            y: i32,
-        }
-
-        fn test_handler_1(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
-            println!("inside_handler 1 {:?}", props);
-            Ok(())
-        }
-        fn test_handler_2(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
-            println!("inside_handler 2 {:?}", props);
-            Ok(())
-        }
-
-        let api_key = std::env::var("GEMINI_API_KEY").unwrap();
-        let gemini = Gemini::builder().api_key(api_key).build().unwrap();
+        let api_key = get_api_key();
+        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
         let tools = Tools::default()
             .with_tool(
                 Tool::builder()
@@ -397,20 +394,21 @@ mod tests {
                     .build()
                     .unwrap(),
             );
-        let mut res = gemini
+
+        let res = gemini
             .generate_content()
-            .add_content(Content::from(
+            .with_content(Content::from(
                 r#"to finish this test use both "test_function_1", "test_function_2" tools with random and different numbers"#,
             ))
-            .model("gemini-1.5-flash")
-            .tools(tools.clone())
+            .with_model("gemini-1.5-flash")
+            .with_tools(tools.clone())
             .build()
             .unwrap()
             .send()
             .await
             .unwrap();
 
-        dbg!(&res);
+        println!("Response: {:?}", res);
         res.invoke_functions(&tools);
     }
 }

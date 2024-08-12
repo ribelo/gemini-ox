@@ -473,7 +473,14 @@ mod tests {
 
     use super::*;
 
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test_configure!(run_in_browser);
+
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_role_serialization() {
         let user_role = Role::User;
         let user_json = serde_json::to_string(&user_role).unwrap();
@@ -485,6 +492,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_role_deserialization() {
         let user_json = "\"user\"";
         let user_role: Role = serde_json::from_str(user_json).unwrap();
@@ -496,6 +504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_content_serialization() {
         let content =
             Content::user().set_parts(vec![Part::Text(Text("Hello, world!".to_string()))]);
@@ -507,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_content_deserialization() {
         let json_content = r#"{"parts":[{"text":"Hello, world!"}],"role":"user"}"#;
         let content: Content = serde_json::from_str(json_content).unwrap();
@@ -517,6 +527,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_part_serialization() {
         let part = Part::Text(Text("Hello, world!".to_string()));
         let json_part = serde_json::to_string(&part).unwrap();
@@ -524,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_part_deserialization() {
         let json_part = r#"{"text":"Hello, world!"}"#;
         let part: Part = serde_json::from_str(json_part).unwrap();
@@ -531,20 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_text_serialization() {
-        let text = Text("Hello, world!".to_string());
-        let json_text = serde_json::to_string(&text).unwrap();
-        assert_eq!(json_text, r#"{"text":"Hello, world!"}"#);
-    }
-
-    #[test]
-    fn test_text_deserialization() {
-        let json_text = r#"{"text":"Hello, world!"}"#;
-        let text: Text = serde_json::from_str(json_text).unwrap();
-        assert_eq!(text, Text("Hello, world!".to_string(),));
-    }
-
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_function_call_serialization() {
         let function_call = FunctionCall {
             name: "my_function".to_string(),
@@ -558,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_function_call_deserialization() {
         let json_function_call = r#"{"name":"my_function","args":{"arg1":"value1","arg2":42}}"#;
         let function_call: FunctionCall = serde_json::from_str(json_function_call).unwrap();
@@ -571,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_function_response_serialization() {
         let function_response = FunctionResponse {
             name: "my_function".to_string(),
@@ -584,6 +585,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_function_response_deserialization() {
         let json_function_response = r#"{"name":"my_function","response":{"result":"success"}}"#;
         let function_response: FunctionResponse =
@@ -596,7 +598,9 @@ mod tests {
             }
         );
     }
+
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_deserialize_content_with_function_call() {
         let input = json!({
             "parts": [
