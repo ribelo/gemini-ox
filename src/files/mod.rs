@@ -205,7 +205,36 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn test_file_upload_request_send() {
+    async fn test_file_upload_request_send_data() {
+        let api_key = get_api_key();
+        let gemini = Gemini::builder()
+            .with_api_key(api_key)
+            .with_api_version("v1beta")
+            .build()
+            .expect("Failed to build Gemini client");
+
+        let file_content = include_bytes!("/home/ribelo/documents/kio/2009_1488.pdf");
+        let request = gemini
+            .upload_file()
+            .with_file_name("test_file.pdf")
+            .with_data(file_content.to_vec())
+            .build()
+            .expect("Failed to build file upload request");
+
+        let result = request.send().await;
+        assert!(result.is_ok(), "File upload failed: {:?}", result.err());
+
+        let file_uri = result.expect("Failed to get file URI");
+        println!("Uploaded file URI: {file_uri}");
+        assert!(
+            file_uri.starts_with("https://"),
+            "File URI does not start with 'https://'"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn test_file_upload_request_send_file() {
         let api_key = get_api_key();
         let gemini = Gemini::builder()
             .with_api_key(api_key)
@@ -224,7 +253,7 @@ mod tests {
         assert!(result.is_ok(), "File upload failed: {:?}", result.err());
 
         let file_uri = result.expect("Failed to get file URI");
-        tracing::info!("Uploaded file URI: {}", file_uri);
+        println!("Uploaded file URI: {}", file_uri);
         assert!(
             file_uri.starts_with("https://"),
             "File URI does not start with 'https://'"
@@ -233,7 +262,7 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test]
-    async fn test_file_upload_request_send() {
+    async fn test_file_upload_request_send_data() {
         let api_key = get_api_key();
         let gemini = Gemini::builder()
             .with_api_key(api_key)
