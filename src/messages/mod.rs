@@ -181,7 +181,6 @@ impl GenerateContentRequest {
             "{}/{}/models/{}:streamGenerateContent?alt=sse&key={}",
             BASE_URL, self.gemini.api_version, self.model, self.gemini.api_key
         );
-
         let stream = self
             .gemini
             .client
@@ -192,19 +191,24 @@ impl GenerateContentRequest {
             .unwrap()
             .bytes_stream();
 
-        stream.map(|chunk| {
-            chunk
-                .map_err(ApiRequestError::ReqwestError)
-                .and_then(|bytes| {
+        stream.filter_map(|chunk| async move {
+            match chunk {
+                Ok(bytes) => {
                     let data = String::from_utf8(bytes.to_vec()).unwrap();
-                    if data.starts_with("data: ") {
-                        let json_data = data.trim_start_matches("data: ");
-                        serde_json::from_str::<GenerateContentResponse>(json_data)
-                            .map_err(ApiRequestError::SerdeError)
-                    } else {
-                        Err(ApiRequestError::InvalidEventData(data))
+                    match data.as_str() {
+                        "" => None,
+                        s if s.starts_with("data: ") => {
+                            let json_data = s.trim_start_matches("data: ");
+                            Some(
+                                serde_json::from_str::<GenerateContentResponse>(json_data)
+                                    .map_err(ApiRequestError::SerdeError),
+                            )
+                        }
+                        _ => Some(Err(ApiRequestError::InvalidEventData(data.to_string()))),
                     }
-                })
+                }
+                Err(e) => Some(Err(ApiRequestError::ReqwestError(e))),
+            }
         })
     }
 
@@ -299,8 +303,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::*;
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test_configure!(run_in_browser);
+    // #[cfg(target_arch = "wasm32")]
+    // wasm_bindgen_test_configure!(run_in_browser);
 
     #[cfg(not(target_arch = "wasm32"))]
     fn get_api_key() -> String {
@@ -315,7 +319,6 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_generate_content_request() {
-        #[cfg(target_arch = "wasm32")]
         let api_key = get_api_key();
         let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
         let mut stream = Box::pin(
@@ -331,12 +334,14 @@ mod tests {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            while let Some(item) = stream.next().await {
-                let content = item.unwrap().candidates[0].content.parts()[0].clone();
+            let mut responses = Vec::new();
+            while let Some(Ok(item)) = stream.next().await {
+                let content = item.candidates[0].content.parts()[0].clone();
                 if let Some(text) = content.as_text() {
-                    println!("Response: {text}");
+                    responses.push(text.to_string());
                 }
             }
+            assert!(!responses.is_empty());
         }
 
         #[cfg(target_arch = "wasm32")]

@@ -1,3 +1,4 @@
+pub mod files;
 pub mod messages;
 
 use core::fmt;
@@ -487,4 +488,6 @@ pub enum ApiRequestError {
     InvalidEventData(String),
     #[error("Rate limit exceeded")]
     RateLimit,
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
 }
