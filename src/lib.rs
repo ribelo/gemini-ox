@@ -9,6 +9,14 @@ use thiserror::Error;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
+#[derive(Debug, PartialEq, PartialOrd, strum::EnumString, strum::Display)]
+pub enum Model {
+    #[strum(to_string = "gemini-1.5-flash")]
+    Gemini15Flash,
+    #[strum(to_string = "gemini-1.5-pro")]
+    Gemini15Pro,
+}
+
 #[cfg(feature = "leaky-bucket")]
 pub use leaky_bucket::RateLimiter;
 #[cfg(feature = "leaky-bucket")]
