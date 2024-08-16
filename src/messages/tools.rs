@@ -3,358 +3,261 @@ use std::{
     collections::HashMap,
     fmt,
     marker::PhantomData,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use super::message::{FunctionCall, FunctionResponse};
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Tool {
-    pub name: String,
-    description: String,
-    parameters: serde_json::Value,
-    #[serde(skip)]
-    pub handler: Option<Arc<dyn ErasedToolHandler>>,
+#[async_trait]
+pub trait AnyTool: Send + Sync {
+    fn name(&self) -> String;
+    fn description(&self) -> Option<String>;
+    async fn invoke_any(&self, function_call: FunctionCall) -> FunctionResponse;
+    fn input_schema(&self) -> Value;
 }
 
-impl fmt::Debug for Tool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Tool")
-            .field("name", &self.name)
-            .field("description", &self.description)
-            .field("parameters", &self.parameters)
-            .finish_non_exhaustive()
+#[async_trait]
+pub trait Tool: Clone + Send + Sync {
+    type Input: JsonSchema + DeserializeOwned + Send + Sync;
+    type Output: Serialize + Send + Sync;
+    type Error: ToString;
+    fn name(&self) -> String;
+    fn description(&self) -> Option<String> {
+        None
     }
-}
-
-impl Tool {
-    // Make new tool. Tool needs to know what kind of stuff it works with.
-    #[must_use]
-    pub fn builder() -> ToolBuilder {
-        ToolBuilder::default()
-    }
-
-    // Use tool on something.
-    #[must_use]
-    pub fn invoke(&self, input: serde_json::Value, cx: ToolContext) -> Option<FunctionResponse> {
-        // If tool has a way to do things...
-        if let Some(handler) = &self.handler {
-            // ...try to do the thing.
-            match handler.call(input, cx) {
-                // If thing worked, return good result.
-                Ok(response) => Some(FunctionResponse {
-                    name: self.name.clone(),
-                    response,
-                }),
-                // If thing failed, return error result.
-                Err(err) => Some(FunctionResponse {
-                    name: self.name.clone(),
-                    response: serde_json::to_value(err).unwrap(),
-                }),
-            }
-        // If tool has no way to do things, return nothing.
+    async fn invoke(&self, input: Self::Input) -> Result<Self::Output, Self::Error>;
+    fn input_schema(&self) -> Value {
+        let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
+            s.inline_subschemas = true;
+            s.meta_schema = None;
+        });
+        let gen = schemars::gen::SchemaGenerator::new(settings);
+        let json_schema = gen.into_root_schema_for::<Self::Input>();
+        let mut input_schema = serde_json::to_value(json_schema).unwrap();
+        input_schema
+            .as_object_mut()
+            .unwrap()
+            .remove("title")
+            .unwrap();
+        if input_schema.get("properties").is_some() {
+            input_schema
         } else {
-            None
+            serde_json::json!(None::<()>)
         }
     }
 }
 
-#[derive(Default)]
-pub struct ToolBuilder {
-    name: Option<String>,
-    description: Option<String>,
-    parameters: Option<serde_json::Value>,
-    handler: Option<Arc<dyn ErasedToolHandler>>,
+#[async_trait]
+impl<T: Tool + Send + Sync> AnyTool for T {
+    fn name(&self) -> String {
+        self.name()
+    }
+
+    fn description(&self) -> Option<String> {
+        self.description()
+    }
+
+    async fn invoke_any(&self, function_call: FunctionCall) -> FunctionResponse {
+        if let Some(input) = function_call.args {
+            let typed_input: T::Input = match serde_json::from_value(input) {
+                Ok(input) => input,
+                Err(e) => {
+                    return FunctionResponse {
+                        name: function_call.name,
+                        response: FunctionCallError::InputDeserializationFailed(e.to_string())
+                            .to_string()
+                            .into(),
+                    }
+                }
+            };
+
+            match self.invoke(typed_input).await {
+                Ok(output) => match serde_json::to_value(output) {
+                    Ok(value) => FunctionResponse {
+                        name: function_call.name,
+                        response: value,
+                    },
+                    Err(e) => FunctionResponse {
+                        name: function_call.name,
+                        response: FunctionCallError::OutputSerializationFailed(e.to_string())
+                            .to_string()
+                            .into(),
+                    },
+                },
+                Err(e) => FunctionResponse {
+                    name: function_call.name,
+                    response: e.to_string().into(),
+                },
+            }
+        } else {
+            unimplemented!()
+        }
+    }
+
+    fn input_schema(&self) -> Value {
+        self.input_schema()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolMetadataInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: Value,
+}
+
+#[derive(Clone, Default)]
+pub struct ToolBox {
+    tools: Arc<RwLock<std::collections::HashMap<String, Arc<dyn AnyTool>>>>,
+}
+
+impl fmt::Debug for ToolBox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tools = self.tools.read().map_err(|_| fmt::Error)?;
+        f.debug_struct("ToolBox")
+            .field("tools", &format!("HashMap with {} entries", tools.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ToolBuilderError {
-    #[error("Tool name is required")]
-    MissingName,
-    #[error("Tool description is required")]
-    MissingDescription,
-    #[error("Tool parameters is required")]
-    MissingParameters,
+pub enum FunctionCallError {
+    #[error("Failed to execute tool: {0}")]
+    ExecutionFailed(String),
+    #[error("Tool not found: {0}")]
+    ToolNotFound(String),
+    #[error("Failed to deserialize input: {0}")]
+    InputDeserializationFailed(String),
+    #[error("Failed to serialize output: {0}")]
+    OutputSerializationFailed(String),
+    #[error("Failed to generate input schema: {0}")]
+    SchemaGenerationFailed(String),
 }
 
-impl ToolBuilder {
-    #[must_use]
-    pub fn name<S: Into<String>>(mut self, name: S) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    pub fn description<S: Into<String>>(mut self, description: S) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    #[must_use]
-    pub fn handler<H, T, R>(mut self, handler: H) -> Self
-    where
-        H: ToolHandler<T, R> + Send + Sync + 'static,
-        T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
-        R: Serialize + Send + Sync + 'static,
-    {
-        let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
-            s.inline_subschemas = true;
-            s.meta_schema = None;
-        });
-        let gen = schemars::gen::SchemaGenerator::new(settings);
-        let json_schema = gen.into_root_schema_for::<T>();
-        let mut parameters = serde_json::to_value(json_schema).unwrap();
-        parameters.as_object_mut().unwrap().remove("title").unwrap();
-        self.parameters = Some(parameters);
-
-        let wrapper = ToolHandlerWrapper::<H, T, R> {
-            handler,
-            phantom: PhantomData,
-        };
-        self.handler = Some(Arc::new(wrapper));
-        self
-    }
-
-    #[must_use]
-    pub fn props<T>(mut self) -> Self
-    where
-        T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
-    {
-        let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
-            s.inline_subschemas = true;
-            s.meta_schema = None;
-        });
-        let gen = schemars::gen::SchemaGenerator::new(settings);
-        let json_schema = gen.into_root_schema_for::<T>();
-        let mut parameters = serde_json::to_value(json_schema).unwrap();
-        parameters.as_object_mut().unwrap().remove("title").unwrap();
-        self.parameters = Some(parameters);
-
-        self
-    }
-
-    /// Consumes the builder, returning a [`Tool`] if all required fields have been set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `name` or `description` are not set.
-    pub fn build(self) -> Result<Tool, ToolBuilderError> {
-        let name = self.name.ok_or(ToolBuilderError::MissingName)?;
-        let description = self
-            .description
-            .ok_or(ToolBuilderError::MissingDescription)?;
-        let parameters = self.parameters.ok_or(ToolBuilderError::MissingParameters)?;
-
-        Ok(Tool {
-            name,
-            description,
-            parameters,
-            handler: self.handler,
-        })
-    }
+#[derive(Serialize, Deserialize)]
+pub struct FunctionDeclarations {
+    function_declarations: Vec<ToolMetadataInfo>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ToolContext {
-    pub resources: Arc<Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
-}
-
-impl ToolContext {
-    pub fn push_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
-        self.resources
-            .lock()
-            .unwrap()
-            .insert(TypeId::of::<T>(), Arc::new(Mutex::new(resource)));
+impl ToolBox {
+    pub fn add<T: Tool + 'static>(&self, tool: T) {
+        let name = tool.name().to_string();
+        self.tools.write().unwrap().insert(name, Arc::new(tool));
     }
 
     #[must_use]
-    pub fn add_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
-        self.push_resource(resource);
-        self
+    pub fn get(&self, name: &str) -> Option<Arc<dyn AnyTool>> {
+        self.tools.read().unwrap().get(name).cloned()
     }
 
-    #[must_use]
-    pub fn get_resource<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
-        self.resources
-            .lock()
-            .unwrap()
-            .get(&TypeId::of::<T>())
-            .and_then(|boxed_resource| boxed_resource.downcast_ref::<T>().cloned())
-    }
-
-    #[must_use]
-    pub fn expect_resource<T: Any + Send + Sync + Clone>(&self) -> T {
-        self.get_resource().expect("Resource not found")
-    }
-}
-
-pub trait FromContext: Sized + Send + 'static {
-    fn from_context(context: &ToolContext) -> Option<Self>;
-}
-
-impl<T> FromContext for T
-where
-    T: Any + Send + Sync + Clone,
-{
-    fn from_context(context: &ToolContext) -> Option<Self> {
-        context.get_resource::<T>()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Tools {
-    tools: HashMap<String, Tool>,
-    #[serde(skip)]
-    context: ToolContext,
-}
-
-impl Serialize for Tools {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        #[derive(Serialize)]
-        #[serde(rename = "camelCase")]
-        struct SerializedTools<'a> {
-            function_declarations: Vec<&'a Tool>,
-        }
-        let tools = SerializedTools {
-            function_declarations: self.tools.values().collect(),
-        };
-        tools.serialize(serializer)
-    }
-}
-
-impl Tools {
-    pub fn add<T: Into<Tool>>(&mut self, tool: T) {
-        let tool = tool.into();
-        self.tools.insert(tool.name.clone(), tool);
-    }
-
-    #[must_use]
-    pub fn with_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
-        self.add(tool);
-        self
-    }
-
-    #[must_use]
-    pub fn get_tool(&self, tool_name: &str) -> Option<&Tool> {
-        self.tools.get(tool_name)
-    }
-
-    #[must_use]
-    pub fn invoke(&self, function_call: &FunctionCall) -> Option<FunctionResponse> {
-        if let Some(tool) = self.get_tool(&function_call.name) {
-            tool.invoke(
-                function_call
-                    .args
-                    .as_ref()
-                    .unwrap_or(&serde_json::Value::Null)
-                    .clone(),
-                self.context.clone(),
-            )
-        } else {
-            None
+    pub async fn invoke(&self, function_call: FunctionCall) -> FunctionResponse {
+        match self.get(&function_call.name) {
+            Some(tool) => tool.invoke_any(function_call).await,
+            None => FunctionResponse {
+                name: function_call.name.clone(),
+                response: FunctionCallError::ToolNotFound(function_call.name)
+                    .to_string()
+                    .into(),
+            },
         }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
-    }
-
-    pub fn push_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
-        self.context.push_resource(resource);
+        self.tools.read().unwrap().is_empty()
     }
 
     #[must_use]
-    pub fn with_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
-        self.context.push_resource(resource);
-        self
+    pub fn len(&self) -> usize {
+        self.tools.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> Vec<FunctionDeclarations> {
+        let tools = self
+            .tools
+            .read()
+            .unwrap()
+            .values()
+            .map(|tool| ToolMetadataInfo {
+                name: tool.name(),
+                description: tool.description(),
+                parameters: tool.input_schema(),
+            })
+            .collect();
+
+        vec![FunctionDeclarations {
+            function_declarations: tools,
+        }]
     }
 }
 
-impl From<Tool> for Tools {
-    fn from(tool: Tool) -> Self {
-        Tools::default().with_tool(tool)
+impl Serialize for ToolBox {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        self.metadata().serialize(serializer)
     }
 }
 
-impl From<Vec<Tool>> for Tools {
-    fn from(tools: Vec<Tool>) -> Self {
-        let mut tools_map = Tools::default();
+impl<T: Tool + 'static> From<Vec<T>> for ToolBox {
+    fn from(tools: Vec<T>) -> Self {
+        let toolbox = ToolBox::default();
         for tool in tools {
-            tools_map.add(tool);
+            toolbox.add(tool);
         }
-        tools_map
+        toolbox
     }
 }
 
-#[derive(Debug, thiserror::Error, Serialize)]
-#[error("{error}")]
-pub struct HandlerError {
-    error: String,
-}
-
-impl HandlerError {
-    pub fn new<T: ToString>(e: T) -> Self {
-        Self {
-            error: e.to_string(),
+impl FromIterator<Arc<dyn AnyTool>> for ToolBox {
+    fn from_iter<I: IntoIterator<Item = Arc<dyn AnyTool>>>(iter: I) -> Self {
+        let toolbox = ToolBox::default();
+        for tool in iter {
+            toolbox
+                .tools
+                .write()
+                .unwrap()
+                .insert(tool.name().to_string(), tool);
         }
+        toolbox
     }
-}
-
-pub trait ToolHandler<T, R> {
-    fn call(&self, input: T, cx: &ToolContext) -> Result<R, HandlerError>;
-}
-
-impl<T, R, F> ToolHandler<T, R> for F
-where
-    F: Fn(T, &ToolContext) -> Result<R, HandlerError>,
-    R: Serialize,
-{
-    fn call(&self, input: T, cx: &ToolContext) -> Result<R, HandlerError> {
-        (self)(input, cx)
-    }
-}
-
-pub trait ErasedToolHandler: Send + Sync {
-    fn call(
-        &self,
-        input: serde_json::Value,
-        cx: ToolContext,
-    ) -> Result<serde_json::Value, HandlerError>;
 }
 
 #[derive(Debug, Clone)]
-pub struct ToolHandlerWrapper<H, T, R>
-where
-    H: ToolHandler<T, R>,
-{
-    pub handler: H,
-    pub phantom: PhantomData<(T, R)>,
+pub struct FunctionCallBuilder {
+    name: String,
+    args: String,
 }
 
-impl<H, T, R> ErasedToolHandler for ToolHandlerWrapper<H, T, R>
-where
-    H: ToolHandler<T, R> + Send + Sync,
-    T: JsonSchema + DeserializeOwned + Send + Sync,
-    R: Serialize + Send + Sync,
-{
-    fn call(
-        &self,
-        input: serde_json::Value,
-        cx: ToolContext,
-    ) -> Result<serde_json::Value, HandlerError> {
-        let props: T = serde_json::from_value(input).map_err(|e| HandlerError {
-            error: e.to_string(),
-        })?;
-        let result = self.handler.call(props, &cx)?;
-        serde_json::to_value(result).map_err(|e| HandlerError {
-            error: e.to_string(),
+impl FunctionCallBuilder {
+    pub fn new<T: Into<String>>(name: T) -> Self {
+        Self {
+            name: name.into(),
+            args: String::new(),
+        }
+    }
+
+    pub fn push_str(&mut self, s: &str) -> &mut Self {
+        self.args.push_str(s);
+        self
+    }
+
+    pub fn build(self) -> Result<FunctionCall, serde_json::Error> {
+        Ok(FunctionCall {
+            name: self.name,
+            args: if self.args.trim().is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str(&self.args)?)
+            },
         })
     }
 }
@@ -431,213 +334,4 @@ pub enum Mode {
     /// Model will not predict any function call. Model behavior is same as when not passing
     /// any function declarations.
     None,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use schemars::JsonSchema;
-    use serde::{Deserialize, Serialize};
-    use serde_json::{json, Value};
-
-    use super::*;
-
-    #[derive(Serialize, Deserialize, JsonSchema)]
-    struct TestParams {
-        foo: String,
-        bar: i32,
-    }
-
-    #[derive(Serialize)]
-    struct TestResponse {
-        message: String,
-    }
-
-    fn test_tool_handler(
-        params: TestParams,
-        _cx: &ToolContext,
-    ) -> Result<TestResponse, HandlerError> {
-        Ok(TestResponse {
-            message: format!("foo: {}, bar: {}", params.foo, params.bar),
-        })
-    }
-
-    #[test]
-    fn test_tool_builder() {
-        let tool = Tool::builder()
-            .name("test_tool".to_string())
-            .description("This is a test tool.".to_string())
-            .handler(|params: TestParams, _cx: &ToolContext| {
-                Ok(TestResponse {
-                    message: format!("foo: {}, bar: {}", params.foo, params.bar),
-                })
-            })
-            .build()
-            .unwrap();
-
-        assert_eq!(tool.name, "test_tool");
-        assert_eq!(tool.description, "This is a test tool.");
-
-        let parameters = tool.parameters;
-        assert_eq!(parameters["type"], Value::String("object".to_string()));
-        assert_eq!(
-            parameters["properties"]["foo"]["type"],
-            Value::String("string".to_string())
-        );
-        assert_eq!(
-            parameters["properties"]["bar"]["type"],
-            Value::String("integer".to_string())
-        );
-    }
-
-    #[test]
-    fn test_tool_serialization() {
-        let tool = Tool {
-            name: "test_tool".to_string(),
-            description: "This is a test tool.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "foo": {
-                        "type": "string"
-                    },
-                    "bar": {
-                        "type": "integer"
-                    }
-                }
-            }),
-            handler: None,
-        };
-
-        let serialized = serde_json::to_string(&tool).unwrap();
-        let expected = json!({
-            "name": "test_tool",
-            "description": "This is a test tool.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "foo": {
-                        "type": "string"
-                    },
-                    "bar": {
-                        "type": "integer"
-                    }
-                }
-            }
-        });
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&serialized).unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_tool_deserialization() {
-        let json_str = r#"
-        {
-            "name": "test_tool",
-            "description": "This is a test tool.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "foo": {
-                        "type": "string"
-                    },
-                    "bar": {
-                        "type": "integer"
-                    }
-                }
-            }
-        }
-        "#;
-        let expected_tool = Tool {
-            name: "test_tool".to_string(),
-            description: "This is a test tool.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "foo": {
-                        "type": "string"
-                    },
-                    "bar": {
-                        "type": "integer"
-                    }
-                }
-            }),
-            handler: None,
-        };
-        let deserialized_tool: Tool = serde_json::from_str(json_str).unwrap();
-        assert_eq!(deserialized_tool.name, expected_tool.name);
-        assert_eq!(deserialized_tool.description, expected_tool.description);
-        assert_eq!(deserialized_tool.parameters, expected_tool.parameters);
-    }
-
-    #[test]
-    fn test_tool_call() {
-        let tool = Tool::builder()
-            .name("test_tool".to_string())
-            .description("This is a test tool.".to_string())
-            .handler(test_tool_handler)
-            .build()
-            .unwrap();
-
-        let input = json!({
-            "foo": "hello",
-            "bar": 42,
-        });
-
-        let cx = ToolContext::default();
-
-        let response = tool.invoke(input, cx).unwrap();
-
-        assert_eq!(response.name, "test_tool");
-        assert_eq!(
-            response.response,
-            json!({
-                "message": "foo: hello, bar: 42"
-            })
-        );
-    }
-
-    #[test]
-    fn test_tool_call_error() {
-        struct ErrorToolHandler;
-
-        impl ToolHandler<TestParams, TestResponse> for ErrorToolHandler {
-            fn call(
-                &self,
-                _params: TestParams,
-                _cx: &ToolContext,
-            ) -> Result<TestResponse, HandlerError> {
-                Err(HandlerError {
-                    error: "Something went wrong!".to_string(),
-                })
-            }
-        }
-
-        let tool = Tool::builder()
-            .name("error_tool".to_string())
-            .description("This tool always returns an error.")
-            .handler(ErrorToolHandler)
-            .build()
-            .unwrap();
-
-        let input = json!({
-            "foo": "hello",
-            "bar": 42,
-        });
-
-        let cx = ToolContext::default();
-
-        let response = tool.invoke(input, cx).unwrap();
-
-        assert_eq!(response.name, "error_tool");
-        assert_eq!(
-            response.response,
-            json!({
-                "error": "Something went wrong!"
-            })
-        );
-    }
 }

@@ -407,8 +407,8 @@ impl std::ops::IndexMut<usize> for Parts {
 pub struct Contents(pub Vec<Content>);
 
 impl Contents {
-    pub fn push<T: Into<Content>>(&mut self, message: T) {
-        self.0.push(message.into());
+    pub fn add_content<T: Into<Content>>(&mut self, content: T) {
+        self.0.push(content.into());
     }
 
     #[must_use]

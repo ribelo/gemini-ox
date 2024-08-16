@@ -2,7 +2,7 @@ use futures::{Stream, StreamExt};
 use message::{Content, Contents, FunctionCall, Parts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tools::{Tool, ToolConfig, Tools};
+use tools::{Tool, ToolBox, ToolConfig};
 
 use crate::{ApiRequestError, Gemini, GenerationConfig, SafetyRating, SafetySettings, BASE_URL};
 
@@ -12,8 +12,8 @@ pub mod tools;
 #[derive(Debug, Serialize)]
 pub struct GenerateContentRequest {
     contents: Contents,
-    #[serde(skip_serializing_if = "Tools::is_empty")]
-    tools: Tools,
+    #[serde(skip_serializing_if = "ToolBox::is_empty")]
+    tools: ToolBox,
     #[serde(skip_serializing_if = "Option::is_none")]
     safety_settings: Option<SafetySettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +36,7 @@ pub enum GenerateContentRequestBuilderError {
 #[derive(Debug)]
 pub struct GenerateContentRequestBuilder {
     contents: Option<Contents>,
-    tools: Option<Tools>,
+    tools: Option<ToolBox>,
     tool_config: Option<ToolConfig>,
     safety_settings: SafetySettings,
     system_instruction: Option<Content>,
@@ -68,7 +68,7 @@ impl GenerateContentRequestBuilder {
     #[must_use]
     pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
         let mut messages = self.contents.take().unwrap_or_default();
-        messages.push(content);
+        messages.add_content(content);
         self.contents = Some(messages);
         self
     }
@@ -80,14 +80,14 @@ impl GenerateContentRequestBuilder {
     }
 
     #[must_use]
-    pub fn with_tools<T: Into<Tools>>(mut self, tools: T) -> Self {
+    pub fn with_tools<T: Into<ToolBox>>(mut self, tools: T) -> Self {
         self.tools = Some(tools.into());
         self
     }
 
     #[must_use]
-    pub fn with_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
-        let mut tools = self.tools.take().unwrap_or_default();
+    pub fn with_tool<T: Tool + 'static>(mut self, tool: T) -> Self {
+        let tools = self.tools.take().unwrap_or_default();
         tools.add(tool);
         self.tools = Some(tools);
         self
@@ -213,7 +213,7 @@ impl GenerateContentRequest {
     }
 
     pub fn add_content<T: Into<Content>>(&mut self, content: T) {
-        self.contents.push(content.into());
+        self.contents.add_content(content.into());
     }
 }
 
@@ -236,15 +236,21 @@ impl GenerateContentResponse {
             .map(|c| c.parts().get_function_calls())
             .unwrap_or_default()
     }
+
     #[must_use]
-    pub fn invoke_functions(&self, tools: &Tools) -> Content {
-        let mut content = Content::user();
-        for fc in self.get_function_calls() {
-            if let Some(res) = tools.invoke(fc) {
-                content.add(res);
-            }
+    pub async fn invoke_functions(&self, tools: &ToolBox) -> Option<Content> {
+        let function_calls = self.get_function_calls();
+        if function_calls.is_empty() {
+            return None;
         }
-        content
+
+        let mut content = Content::user();
+        for fc in function_calls {
+            let result = tools.invoke(fc.to_owned()).await;
+            content.add(result);
+        }
+
+        (!content.is_empty()).then_some(content)
     }
 }
 
@@ -295,11 +301,14 @@ pub struct UsageMetadata {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{atomic::AtomicBool, Arc};
+
     use super::*;
+    use async_trait::async_trait;
     use schemars::JsonSchema;
     use serde::Deserialize;
 
-    use tools::{HandlerError, ToolContext};
+    use serde_json::json;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::*;
 
@@ -359,22 +368,48 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy, JsonSchema, Deserialize)]
-    struct TestProps {
-        #[schemars(description = "random number")]
-        x: i32,
-        #[schemars(description = "random number")]
-        y: i32,
+    #[derive(Clone)]
+    pub struct ToolOne;
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    pub struct ToolOneParams {
+        number: i32,
     }
 
-    fn test_handler_1(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
-        println!("inside_handler 1 {:?}", props);
-        Ok(())
+    #[async_trait]
+    impl Tool for ToolOne {
+        type Input = ToolOneParams;
+
+        type Output = String;
+
+        type Error = String;
+
+        fn name(&self) -> String {
+            "tool_one".to_string()
+        }
+
+        async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
+            Ok(self.name())
+        }
     }
 
-    fn test_handler_2(props: TestProps, _cx: &ToolContext) -> Result<(), HandlerError> {
-        println!("inside_handler 2 {:?}", props);
-        Ok(())
+    #[derive(Clone)]
+    pub struct ToolTwo;
+
+    #[async_trait]
+    impl Tool for ToolTwo {
+        type Input = Value;
+
+        type Output = String;
+
+        type Error = String;
+
+        fn name(&self) -> String {
+            "tool_two".to_string()
+        }
+
+        async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
+            Ok(self.name())
+        }
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -382,28 +417,14 @@ mod tests {
     async fn test_function_calling() {
         let api_key = get_api_key();
         let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
-        let tools = Tools::default()
-            .with_tool(
-                Tool::builder()
-                    .name("test_function_1")
-                    .description("use this to finish this test")
-                    .handler(test_handler_1)
-                    .build()
-                    .unwrap(),
-            )
-            .with_tool(
-                Tool::builder()
-                    .name("test_function_2")
-                    .description("use this to finish this test")
-                    .handler(test_handler_2)
-                    .build()
-                    .unwrap(),
-            );
+        let tools = ToolBox::default();
+        tools.add(ToolOne);
+        tools.add(ToolTwo);
 
         let res = gemini
             .generate_content()
             .with_content(Content::from(
-                r#"to finish this test use both "test_function_1", "test_function_2" tools with random and different numbers"#,
+                r#"to finish this test use both "tool_one", "tool_two" tools"#,
             ))
             .with_model("gemini-1.5-flash")
             .with_tools(tools.clone())
@@ -413,7 +434,142 @@ mod tests {
             .await
             .unwrap();
 
-        println!("Response: {:?}", res);
-        res.invoke_functions(&tools);
+        dbg!(&res);
+        let content = res.invoke_functions(&tools).await;
+        dbg!(content);
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_messages_request_success() {
+        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+        struct TestHandlerProps {
+            random_number: i32,
+        }
+
+        #[derive(Clone, Debug, Default)]
+        struct TestTool {
+            is_called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Tool for TestTool {
+            type Input = TestHandlerProps;
+
+            type Output = Value;
+
+            type Error = String;
+
+            fn name(&self) -> String {
+                "test_tool".to_string()
+            }
+
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
+                self.is_called
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(json!({"result": "To finish this test use [finish_test] tool"}))
+            }
+        }
+
+        #[derive(Default, Debug, Clone)]
+        struct FinishTool {
+            is_called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Tool for FinishTool {
+            type Input = Value;
+
+            type Output = Value;
+
+            type Error = String;
+
+            fn name(&self) -> String {
+                "finish_tool".to_string()
+            }
+
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
+                self.is_called
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(json!({"result": "Congratulations! You finished the test." }))
+            }
+        }
+
+        let api_key = get_api_key();
+        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
+
+        let tools = ToolBox::default();
+        let test_tool = TestTool::default();
+        tools.add(test_tool.clone());
+        let finish_tool = FinishTool::default();
+        tools.add(finish_tool.clone());
+
+        let mut contents = Contents::default();
+        contents.add_content(Content::from(
+            "This is testing environent. To continue this test use [test_tool]",
+        ));
+
+        let mut i = 0;
+        loop {
+            if i > 3 {
+                dbg!(contents);
+                dbg!(test_tool);
+                dbg!(finish_tool);
+                panic!("Test failed");
+            }
+            i += 1;
+
+            let res = match gemini
+                .generate_content()
+                .with_contents(contents.clone())
+                .with_model("gemini-1.5-flash")
+                .with_tools(tools.clone())
+                .build()
+                .unwrap()
+                .send()
+                .await
+            {
+                Ok(res) => res,
+                Err(err) => {
+                    println!(
+                        "---\n\n{}\n\n---",
+                        serde_json::to_string_pretty(&contents).unwrap()
+                    );
+                    dbg!(test_tool);
+                    dbg!(finish_tool);
+                    panic!("{err}")
+                }
+            };
+
+            contents.add_content(res.clone());
+
+            let tool_results = res.invoke_functions(&tools).await;
+            match tool_results {
+                None => {
+                    contents.add_content(Content::from("Follow instructions and use tools!"));
+                }
+                Some(results) => {
+                    contents.add_content(results);
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&contents).unwrap());
+
+            if finish_tool
+                .is_called
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && test_tool
+                    .is_called
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                #[cfg(target_arch = "wasm32")]
+                console_log!("Test passed");
+                println!("Test passed");
+                println!(
+                    "---\n\n{}\n\n---",
+                    serde_json::to_string_pretty(&contents).unwrap()
+                );
+                break;
+            }
+        }
     }
 }
