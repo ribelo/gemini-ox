@@ -67,9 +67,8 @@ impl GenerateContentRequestBuilder {
 
     #[must_use]
     pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
-        let mut messages = self.contents.take().unwrap_or_default();
-        messages.add_content(content);
-        self.contents = Some(messages);
+        let messages = self.contents.take().unwrap_or_default();
+        self.contents = Some(messages.with_content(content));
         self
     }
 
@@ -213,7 +212,7 @@ impl GenerateContentRequest {
     }
 
     pub fn add_content<T: Into<Content>>(&mut self, content: T) {
-        self.contents.add_content(content.into());
+        self.contents = std::mem::take(&mut self.contents).with_content(content.into());
     }
 }
 
@@ -247,7 +246,7 @@ impl GenerateContentResponse {
         let mut content = Content::user();
         for fc in function_calls {
             let result = tools.invoke(fc.to_owned()).await;
-            content.add(result);
+            content.add_part(result);
         }
 
         (!content.is_empty()).then_some(content)
@@ -566,8 +565,7 @@ mod tests {
         let finish_tool = FinishTool::default();
         tools.add(finish_tool.clone());
 
-        let mut contents = Contents::default();
-        contents.add_content(Content::from(
+        let mut contents = Contents::default().with_content(Content::from(
             "This is testing environent. To continue this test use [test_tool]",
         ));
 

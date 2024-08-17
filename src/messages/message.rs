@@ -44,7 +44,7 @@ impl Content {
     }
 
     #[must_use]
-    pub fn set_parts<P, I>(mut self, parts: I) -> Self
+    pub fn with_parts<P, I>(mut self, parts: I) -> Self
     where
         P: Into<Part>,
         I: IntoIterator<Item = P>,
@@ -57,16 +57,16 @@ impl Content {
         self
     }
 
-    pub fn add<T: Into<Part>>(&mut self, part: T) {
+    #[must_use]
+    pub fn with_part<T: Into<Part>>(mut self, part: T) -> Self {
+        self.add_part(part);
+        self
+    }
+
+    pub fn add_part<T: Into<Part>>(&mut self, part: T) {
         match self {
             Content::Model { parts } | Content::User { parts } => parts.push(part.into()),
         }
-    }
-
-    #[must_use]
-    pub fn with_part<T: Into<Part>>(mut self, part: T) -> Self {
-        self.add(part);
-        self
     }
 
     #[must_use]
@@ -108,7 +108,7 @@ impl Content {
 
 impl FromIterator<Part> for Content {
     fn from_iter<T: IntoIterator<Item = Part>>(iter: T) -> Self {
-        Self::user().set_parts(iter)
+        Self::user().with_parts(iter)
     }
 }
 
@@ -407,7 +407,33 @@ impl std::ops::IndexMut<usize> for Parts {
 pub struct Contents(pub Vec<Content>);
 
 impl Contents {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
     pub fn add_content<T: Into<Content>>(&mut self, content: T) {
+        self.0.push(content.into());
+    }
+
+    #[must_use]
+    pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
+        self.add_content(content.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_contents<T, I>(mut self, contents: I) -> Self
+    where
+        T: Into<Content>,
+        I: IntoIterator<Item = T>,
+    {
+        self.0.extend(contents.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn push<T: Into<Content>>(&mut self, content: T) {
         self.0.push(content.into());
     }
 
@@ -418,7 +444,29 @@ impl Contents {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &Content> {
+        self.0.iter()
+    }
+
+    #[must_use]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Content> {
+        self.0.iter_mut()
+    }
+}
+
+impl FromIterator<Content> for Contents {
+    fn from_iter<I: IntoIterator<Item = Content>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<T: Into<Content>> Extend<T> for Contents {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.0.extend(iter.into_iter().map(Into::into));
     }
 }
 
@@ -431,24 +479,6 @@ impl From<Content> for Contents {
 impl From<Vec<Content>> for Contents {
     fn from(value: Vec<Content>) -> Self {
         Contents(value)
-    }
-}
-
-impl FromIterator<Content> for Contents {
-    fn from_iter<T: IntoIterator<Item = Content>>(iter: T) -> Self {
-        Contents(iter.into_iter().collect())
-    }
-}
-
-impl<T> Extend<T> for Contents
-where
-    T: Into<Content>,
-{
-    fn extend<I>(&mut self, iter: I)
-    where
-        I: IntoIterator<Item = T>,
-    {
-        self.0.extend(iter.into_iter().map(Into::into));
     }
 }
 
@@ -507,7 +537,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_content_serialization() {
         let content =
-            Content::user().set_parts(vec![Part::Text(Text("Hello, world!".to_string()))]);
+            Content::user().with_parts(vec![Part::Text(Text("Hello, world!".to_string()))]);
         let json_content = serde_json::to_string(&content).unwrap();
         assert_eq!(
             json_content,
@@ -522,7 +552,7 @@ mod tests {
         let content: Content = serde_json::from_str(json_content).unwrap();
         assert_eq!(
             content,
-            Content::user().set_parts(vec![Part::Text(Text("Hello, world!".to_string(),))])
+            Content::user().with_parts(vec![Part::Text(Text("Hello, world!".to_string(),))])
         );
     }
 
