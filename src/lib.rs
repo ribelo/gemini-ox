@@ -4,7 +4,9 @@ pub mod messages;
 use core::fmt;
 
 use messages::message::Content;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com";
@@ -260,7 +262,7 @@ pub struct GenerationConfig {
     /// Output response schema of the generated candidate text when response mime type can have schema. Schema can be objects, primitives or arrays and is a subset of OpenAPI schema.
     /// If set, a compatible responseMimeType must also be set. Compatible mimetypes: application/json: Schema for JSON response.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_schema: Option<ResponseSchema>,
+    pub response_schema: Option<Value>,
     /// Number of generated responses to return.
     /// Currently, this value can only be set to 1. If unset, this will default to 1.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -303,8 +305,20 @@ impl GenerationConfig {
         self
     }
     #[must_use]
-    pub fn with_response_schema(mut self, response_schema: ResponseSchema) -> Self {
-        self.response_schema = Some(response_schema);
+    pub fn with_response_schema<T: JsonSchema>(mut self) -> Self {
+        let settings = schemars::gen::SchemaSettings::openapi3().with(|s| {
+            s.inline_subschemas = true;
+            s.meta_schema = None;
+        });
+        let gen = schemars::gen::SchemaGenerator::new(settings);
+        let root_schema = gen.into_root_schema_for::<T>();
+        let mut json_schema = serde_json::to_value(root_schema).unwrap();
+        json_schema
+            .as_object_mut()
+            .unwrap()
+            .remove("title")
+            .unwrap();
+        self.response_schema = Some(json_schema);
         self
     }
     #[must_use]
@@ -330,121 +344,6 @@ impl GenerationConfig {
     #[must_use]
     pub fn with_top_k(mut self, top_k: i32) -> Self {
         self.top_k = Some(top_k);
-        self
-    }
-}
-
-/// Schema
-/// The Schema object allows the definition of input and output data types. These types can be objects, but also primitives and arrays. Represents a select subset of an OpenAPI 3.0 schema object.
-/// JSON representation
-/// ```json
-/// {
-///   "type": "enum(Type)",
-///   "format": "string",
-///   "description": "string",
-///   "nullable": true,
-///   "enum": [
-///     "string"
-///   ],
-///   "properties": {
-///     "string": {
-///       "object": "Schema"
-///     }
-///   },
-///   "required": [
-///     "string"
-///   ],
-///   "items": {
-///     "object": "Schema"
-///   }
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResponseSchema {
-    /// Required. Data type.
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// The format of the data. This is used only for primitive datatypes. Supported formats: for NUMBER type: float, double for INTEGER type: int32, int64
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    /// A brief description of the parameter. This could contain examples of use. Parameter description may be formatted as Markdown.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Indicates if the value may be null.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nullable: Option<bool>,
-    #[allow(clippy::doc_link_with_quotes)]
-    /// Possible values of the element of Type.STRING with enum format. For example we can define an Enum Direction as : {type:STRING, format:enum, enum:["EAST", NORTH", "SOUTH", "WEST"]}
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enum_: Option<Vec<String>>,
-    /// An object containing a list of "key": value pairs. Example: { "name": "wrench", "mass": "1.3kg", "count": "3" }.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<std::collections::HashMap<String, Box<ResponseSchema>>>,
-    /// Required properties of Type.OBJECT.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub required: Option<Vec<String>>,
-    /// Schema of the elements of Type.ARRAY.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<Box<ResponseSchema>>,
-}
-impl ResponseSchema {
-    #[must_use]
-    pub fn new(type_: String) -> Self {
-        Self {
-            type_,
-            format: None,
-            description: None,
-            nullable: None,
-            enum_: None,
-            properties: None,
-            required: None,
-            items: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_format(mut self, format: String) -> Self {
-        self.format = Some(format);
-        self
-    }
-
-    #[must_use]
-    pub fn with_description(mut self, description: String) -> Self {
-        self.description = Some(description);
-        self
-    }
-
-    #[must_use]
-    pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.nullable = Some(nullable);
-        self
-    }
-
-    #[must_use]
-    pub fn with_enum(mut self, enum_: Vec<String>) -> Self {
-        self.enum_ = Some(enum_);
-        self
-    }
-
-    #[must_use]
-    pub fn with_properties(
-        mut self,
-        properties: std::collections::HashMap<String, Box<ResponseSchema>>,
-    ) -> Self {
-        self.properties = Some(properties);
-        self
-    }
-
-    #[must_use]
-    pub fn with_required(mut self, required: Vec<String>) -> Self {
-        self.required = Some(required);
-        self
-    }
-
-    #[must_use]
-    pub fn with_items(mut self, items: Box<ResponseSchema>) -> Self {
-        self.items = Some(items);
         self
     }
 }

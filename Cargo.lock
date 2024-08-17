@@ -235,6 +235,7 @@ dependencies = [
  "derivative",
  "futures",
  "leaky-bucket",
+ "mime",
  "mime_guess",
  "reqwest",
  "schemars",

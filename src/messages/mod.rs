@@ -441,6 +441,68 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_json_output() {
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Book {
+            #[schemars(description = "Unique identifier for the book")]
+            pub id: i64,
+
+            #[schemars(description = "Title of the book")]
+            pub title: String,
+
+            #[schemars(description = "Author of the book")]
+            pub author: String,
+
+            #[schemars(description = "ISBN (International Standard Book Number)")]
+            pub isbn: String,
+
+            #[schemars(description = "Genre of the book")]
+            pub genre: String,
+
+            #[schemars(description = "Number of pages in the book")]
+            #[schemars(range(min = 1))]
+            pub page_count: i32,
+
+            #[schemars(description = "Average rating of the book")]
+            #[schemars(range(min = 0.0, max = 5.0))]
+            pub rating: f32,
+
+            #[schemars(description = "Whether the book is currently available")]
+            pub available: bool,
+
+            #[schemars(description = "Tags associated with the book")]
+            #[schemars(length(max = 5))]
+            pub tags: Vec<String>,
+        }
+
+        let api_key = get_api_key();
+        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
+        let config = GenerationConfig::default()
+            .with_response_mime_type("application/json".to_string())
+            .with_response_schema::<Book>();
+
+        let res = gemini
+            .generate_content()
+            .with_content(Content::from(r"Describe Peter Watts Echopraxia book"))
+            .with_model("gemini-1.5-flash")
+            .with_generation_config(config)
+            .build()
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+
+        let text = res.candidates[0].content.parts()[0]
+            .as_text()
+            .unwrap()
+            .to_string();
+        let json = serde_json::from_str::<Book>(&text).unwrap();
+
+        dbg!(&json);
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_messages_request_success() {
         #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
         struct TestHandlerProps {

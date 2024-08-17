@@ -25,6 +25,7 @@ derivative = "2.2"
 schemars = "0.8"
 bytes = "1.7"
 mime_guess = "2.0"
+mime = "0.3.17"
 async-trait = "0.1"
 strum = { version = "0.26", features = ["derive"] }
 
