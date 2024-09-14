@@ -1,7 +1,8 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use typed_builder::TypedBuilder;
 
 /// Represents the role of a message sender in a conversation.
 ///
@@ -14,66 +15,36 @@ pub enum Role {
     Model,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(tag = "role", rename_all = "camelCase")]
-pub enum Content {
-    User { parts: Parts },
-    Model { parts: Parts },
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TypedBuilder)]
+pub struct Content<'a> {
+    #[builder(setter(into))]
+    pub role: Role,
+    #[builder(default, setter(transform = |v: impl IntoIterator<Item = impl Into<Part<'a>>>|
+        v.into_iter().map(Into::into).collect::<Vec<_>>()
+    ))]
+    pub parts: Vec<Part<'a>>,
 }
 
-impl Content {
+impl<'a> Content<'a> {
     #[must_use]
-    pub fn user() -> Self {
-        Self::User {
-            parts: Parts::default(),
-        }
+    pub fn parts(&self) -> &Vec<Part<'a>> {
+        &self.parts
     }
 
-    #[must_use]
-    pub fn model() -> Self {
-        Self::Model {
-            parts: Parts::default(),
-        }
+    pub fn parts_mut(&mut self) -> &mut Vec<Part<'a>> {
+        &mut self.parts
     }
 
-    #[must_use]
-    pub fn parts(&self) -> &Parts {
-        match self {
-            Content::Model { parts: p } | Content::User { parts: p } => p,
-        }
-    }
-
-    #[must_use]
-    pub fn with_parts<P, I>(mut self, parts: I) -> Self
-    where
-        P: Into<Part>,
-        I: IntoIterator<Item = P>,
-    {
-        match &mut self {
-            Content::Model { parts: p } | Content::User { parts: p } => {
-                *p = parts.into_iter().map(Into::into).collect();
-            }
-        }
-        self
-    }
-
-    #[must_use]
-    pub fn with_part<T: Into<Part>>(mut self, part: T) -> Self {
-        self.add_part(part);
-        self
-    }
-
-    pub fn add_part<T: Into<Part>>(&mut self, part: T) {
-        match self {
-            Content::Model { parts } | Content::User { parts } => parts.push(part.into()),
-        }
+    pub fn push<T: Into<Part<'a>>>(&mut self, part: T) {
+        self.parts.push(part.into());
     }
 
     #[must_use]
     pub fn as_user(&self) -> Option<&Self> {
-        match self {
-            Content::User { .. } => Some(self),
-            Content::Model { .. } => None,
+        if self.role == Role::User {
+            Some(self)
+        } else {
+            None
         }
     }
 
@@ -84,9 +55,10 @@ impl Content {
 
     #[must_use]
     pub fn as_model(&self) -> Option<&Self> {
-        match self {
-            Content::Model { .. } => Some(self),
-            Content::User { .. } => None,
+        if self.role == Role::Model {
+            Some(self)
+        } else {
+            None
         }
     }
 
@@ -97,38 +69,58 @@ impl Content {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.parts().is_empty()
+        self.parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Part<'a>> {
+        self.parts.iter()
     }
 
     #[must_use]
-    pub fn iter(&self) -> impl Iterator<Item = &Part> {
-        self.parts().iter()
-    }
-}
-
-impl FromIterator<Part> for Content {
-    fn from_iter<T: IntoIterator<Item = Part>>(iter: T) -> Self {
-        Self::user().with_parts(iter)
-    }
-}
-
-impl From<&'static str> for Content {
-    fn from(value: &'static str) -> Self {
-        Self::user().with_part(value)
-    }
-}
-
-impl From<String> for Content {
-    fn from(value: String) -> Self {
-        Self::user().with_part(value)
-    }
-}
-
-impl Extend<Part> for Content {
-    fn extend<T: IntoIterator<Item = Part>>(&mut self, iter: T) {
-        match self {
-            Content::User { parts } | Content::Model { parts } => parts.extend(iter),
+    pub fn to_owned(&self) -> Content<'static> {
+        Content {
+            role: self.role.clone(),
+            parts: self.parts.iter().map(Part::to_owned).collect(),
         }
+    }
+}
+
+impl<'a> IntoIterator for Content<'a> {
+    type Item = Part<'a>;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.parts.into_iter()
+    }
+}
+
+impl<'a> FromIterator<Part<'a>> for Content<'a> {
+    fn from_iter<T: IntoIterator<Item = Part<'a>>>(iter: T) -> Self {
+        Self::builder().role(Role::User).parts(iter).build()
+    }
+}
+
+impl<'a> From<&'a str> for Content<'a> {
+    fn from(value: &'a str) -> Self {
+        Content::builder()
+            .role(Role::User)
+            .parts(vec![Part::from(value)])
+            .build()
+    }
+}
+
+impl<'a> From<String> for Content<'a> {
+    fn from(value: String) -> Self {
+        Content::builder()
+            .role(Role::User)
+            .parts(vec![Part::from(value)])
+            .build()
+    }
+}
+
+impl<'a> Extend<Part<'a>> for Content<'a> {
+    fn extend<T: IntoIterator<Item = Part<'a>>>(&mut self, iter: T) {
+        self.parts_mut().extend(iter);
     }
 }
 
@@ -139,11 +131,11 @@ impl Extend<Part> for Content {
 /// A Part must have a fixed IANA MIME type identifying the type and subtype of the media if the inlineData field is filled with raw bytes.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum Part {
+pub enum Part<'a> {
     /// Inline text.
-    Text(Text),
+    Text(Text<'a>),
     /// Inline media bytes.
-    InlineData(Blob),
+    InlineData(Blob<'a>),
     /// A predicted FunctionCall returned from the model that contains a string representing the FunctionDeclaration.name with the arguments and their values.
     FunctionCall(FunctionCall),
     /// The result output of a FunctionCall that contains a string representing the FunctionDeclaration.name and a structured JSON object containing any output from the function is used as context to the model.
@@ -152,7 +144,7 @@ pub enum Part {
     FileData(FileData),
 }
 
-impl Part {
+impl<'a> Part<'a> {
     /// If the `Part` is a `Text` variant, return `Some(Text)`, otherwise return `None`.
     #[must_use]
     pub fn as_text(&self) -> Option<&Text> {
@@ -217,66 +209,80 @@ impl Part {
     pub fn expect_file_data(&self) -> &FileData {
         self.as_file_data().expect("Expected Part to be FileData")
     }
+
+    #[must_use]
+    pub fn to_owned(&self) -> Part<'static> {
+        match self {
+            Part::Text(text) => Part::Text(Text(Cow::Owned(text.0.to_string()))),
+            Part::InlineData(blob) => Part::InlineData(Blob {
+                mime_type: blob.mime_type.clone(),
+                data: Cow::Owned(blob.data.to_string()),
+            }),
+            Part::FunctionCall(func_call) => Part::FunctionCall(func_call.clone()),
+            Part::FunctionResponse(func_response) => Part::FunctionResponse(func_response.clone()),
+            Part::FileData(file_data) => Part::FileData(file_data.clone()),
+        }
+    }
 }
 
-impl From<String> for Part {
+impl<'a> From<String> for Part<'a> {
     fn from(value: String) -> Self {
         Part::Text(value.into())
     }
 }
 
-impl From<&'static str> for Part {
-    fn from(value: &'static str) -> Self {
+impl<'a> From<&'a str> for Part<'a> {
+    fn from(value: &'a str) -> Self {
         Part::Text(value.into())
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct Text(pub String);
+pub struct Text<'a>(pub Cow<'a, str>);
 
-impl From<String> for Text {
+impl<'a> From<&'a str> for Text<'a> {
+    fn from(value: &'a str) -> Self {
+        Self(Cow::Borrowed(value))
+    }
+}
+
+impl<'a> From<String> for Text<'a> {
     fn from(value: String) -> Self {
-        Self(value)
+        Self(Cow::Owned(value))
     }
 }
 
-impl From<&'static str> for Text {
-    fn from(value: &'static str) -> Self {
-        Self(value.to_string())
-    }
-}
-
-impl fmt::Display for Text {
+impl<'a> fmt::Display for Text<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-impl From<Text> for Part {
-    fn from(text: Text) -> Self {
+impl<'a> From<Text<'a>> for Part<'a> {
+    fn from(text: Text<'a>) -> Self {
         Self::Text(text)
     }
 }
 
-impl From<Blob> for Part {
-    fn from(blob: Blob) -> Self {
+impl<'a> From<Blob<'a>> for Part<'a> {
+    fn from(blob: Blob<'a>) -> Self {
         Self::InlineData(blob)
     }
 }
 
-impl From<FunctionCall> for Part {
+impl<'a> From<FunctionCall> for Part<'a> {
     fn from(function_call: FunctionCall) -> Self {
         Self::FunctionCall(function_call)
     }
 }
 
-impl From<FunctionResponse> for Part {
+impl<'a> From<FunctionResponse> for Part<'a> {
     fn from(function_response: FunctionResponse) -> Self {
         Self::FunctionResponse(function_response)
     }
 }
 
-impl From<FileData> for Part {
+impl<'a> From<FileData> for Part<'a> {
     fn from(file_data: FileData) -> Self {
         Self::FileData(file_data)
     }
@@ -288,14 +294,14 @@ impl From<FileData> for Part {
 /// Text should not be sent as raw bytes, use the 'text' field.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct Blob {
+pub struct Blob<'a> {
     /// The IANA standard MIME type of the source data. Examples: - image/png - image/jpeg
     /// If an unsupported MIME type is provided, an error will be returned.
     /// For a complete list of supported types, see Supported file formats.
     pub mime_type: String,
     /// Raw bytes for media formats.
     /// A base64-encoded string.
-    pub data: String,
+    pub data: Cow<'a, str>,
 }
 
 /// FunctionCall
@@ -332,169 +338,6 @@ pub struct FileData {
     pub mime_type: Option<String>,
     /// Required. URI.
     pub file_uri: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct Parts(pub Vec<Part>);
-
-impl Parts {
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn push<T: Into<Part>>(&mut self, part: T) {
-        self.0.push(part.into());
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Part> {
-        self.0.iter()
-    }
-
-    pub fn get_function_calls(&self) -> Vec<&FunctionCall> {
-        self.0
-            .iter()
-            .filter_map(|part| match part {
-                Part::FunctionCall(function_call) => Some(function_call),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-impl FromIterator<Part> for Parts {
-    fn from_iter<T: IntoIterator<Item = Part>>(iter: T) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-impl IntoIterator for Parts {
-    type Item = Part;
-    type IntoIter = <Vec<Part> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl Extend<Part> for Parts {
-    fn extend<T: IntoIterator<Item = Part>>(&mut self, iter: T) {
-        // Parts is just a Vec<Part>, so extend it directly
-        self.0.extend(iter);
-    }
-}
-
-/// Allows accessing parts by index.
-impl std::ops::Index<usize> for Parts {
-    type Output = Part;
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-/// Allows modifying parts by index.
-impl std::ops::IndexMut<usize> for Parts {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.0[index]
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Contents(pub Vec<Content>);
-
-impl Contents {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn add_content<T: Into<Content>>(&mut self, content: T) {
-        self.0.push(content.into());
-    }
-
-    #[must_use]
-    pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
-        self.add_content(content.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_contents<T, I>(mut self, contents: I) -> Self
-    where
-        T: Into<Content>,
-        I: IntoIterator<Item = T>,
-    {
-        self.0.extend(contents.into_iter().map(Into::into));
-        self
-    }
-
-    pub fn push<T: Into<Content>>(&mut self, content: T) {
-        self.0.push(content.into());
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    #[must_use]
-    pub fn iter(&self) -> impl Iterator<Item = &Content> {
-        self.0.iter()
-    }
-
-    #[must_use]
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Content> {
-        self.0.iter_mut()
-    }
-}
-
-impl FromIterator<Content> for Contents {
-    fn from_iter<I: IntoIterator<Item = Content>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-impl<T: Into<Content>> Extend<T> for Contents {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.0.extend(iter.into_iter().map(Into::into));
-    }
-}
-
-impl From<Content> for Contents {
-    fn from(value: Content) -> Self {
-        Contents(vec![value])
-    }
-}
-
-impl From<Vec<Content>> for Contents {
-    fn from(value: Vec<Content>) -> Self {
-        Contents(value)
-    }
-}
-
-impl std::ops::Index<usize> for Contents {
-    type Output = Content;
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
-impl IntoIterator for Contents {
-    type Item = Content;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
 }
 
 #[cfg(test)]
@@ -536,9 +379,12 @@ mod tests {
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_content_serialization() {
-        let content =
-            Content::user().with_parts(vec![Part::Text(Text("Hello, world!".to_string()))]);
+        let content = Content::builder()
+            .role(Role::User)
+            .parts(vec![Part::Text(Text::from("Hello, world!"))])
+            .build();
         let json_content = serde_json::to_string(&content).unwrap();
+        dbg!(serde_json::to_string(&content).unwrap());
         assert_eq!(
             json_content,
             r#"{"role":"user","parts":[{"text":"Hello, world!"}]}"#
@@ -552,14 +398,17 @@ mod tests {
         let content: Content = serde_json::from_str(json_content).unwrap();
         assert_eq!(
             content,
-            Content::user().with_parts(vec![Part::Text(Text("Hello, world!".to_string(),))])
+            Content::builder()
+                .role(Role::User)
+                .parts(vec![Part::Text(Text::from("Hello, world!"))])
+                .build()
         );
     }
 
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_part_serialization() {
-        let part = Part::Text(Text("Hello, world!".to_string()));
+        let part = Part::Text(Text::from("Hello, world!"));
         let json_part = serde_json::to_string(&part).unwrap();
         assert_eq!(json_part, r#"{"text":"Hello, world!"}"#);
     }
@@ -569,7 +418,7 @@ mod tests {
     fn test_part_deserialization() {
         let json_part = r#"{"text":"Hello, world!"}"#;
         let part: Part = serde_json::from_str(json_part).unwrap();
-        assert_eq!(part, Part::Text(Text("Hello, world!".to_string(),)));
+        assert_eq!(part, Part::Text(Text::from("Hello, world!")));
     }
 
     #[test]
@@ -647,15 +496,16 @@ mod tests {
             "role": "model"
         });
 
-        let expected = Content::Model {
-            parts: Parts(vec![Part::FunctionCall(FunctionCall {
+        let expected = Content::builder()
+            .role(Role::Model)
+            .parts(vec![Part::FunctionCall(FunctionCall {
                 name: "test_function".to_string(),
                 args: Some(json!({
                     "x": 1,
                     "y": 2
                 })),
-            })]),
-        };
+            })])
+            .build();
         let result: Content = serde_json::from_value(input).unwrap();
         assert_eq!(result, expected);
     }

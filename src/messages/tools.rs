@@ -1,15 +1,12 @@
 use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
     fmt,
-    marker::PhantomData,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::message::{FunctionCall, FunctionResponse};
 
@@ -63,39 +60,42 @@ impl<T: Tool + Send + Sync> AnyTool for T {
     }
 
     async fn invoke_any(&self, function_call: FunctionCall) -> FunctionResponse {
-        if let Some(input) = function_call.args {
-            let typed_input: T::Input = match serde_json::from_value(input) {
-                Ok(input) => input,
-                Err(e) => {
-                    return FunctionResponse {
-                        name: function_call.name,
-                        response: FunctionCallError::InputDeserializationFailed(e.to_string())
-                            .to_string()
-                            .into(),
-                    }
-                }
+        let Some(input) = function_call.args else {
+            return FunctionResponse {
+                name: function_call.name,
+                response: FunctionCallError::MissingArguments.to_string().into(),
             };
+        };
 
-            match self.invoke(typed_input).await {
-                Ok(output) => match serde_json::to_value(output) {
-                    Ok(value) => FunctionResponse {
-                        name: function_call.name,
-                        response: value,
-                    },
-                    Err(e) => FunctionResponse {
-                        name: function_call.name,
-                        response: FunctionCallError::OutputSerializationFailed(e.to_string())
-                            .to_string()
-                            .into(),
-                    },
+        let typed_input: T::Input = match serde_json::from_value(input) {
+            Ok(input) => input,
+            Err(e) => {
+                return FunctionResponse {
+                    name: function_call.name,
+                    response: FunctionCallError::InputDeserializationFailed(e.to_string())
+                        .to_string()
+                        .into(),
+                }
+            }
+        };
+
+        match self.invoke(typed_input).await {
+            Ok(output) => match serde_json::to_value(output) {
+                Ok(value) => FunctionResponse {
+                    name: function_call.name,
+                    response: value,
                 },
                 Err(e) => FunctionResponse {
                     name: function_call.name,
-                    response: e.to_string().into(),
+                    response: FunctionCallError::OutputSerializationFailed(e.to_string())
+                        .to_string()
+                        .into(),
                 },
-            }
-        } else {
-            unimplemented!()
+            },
+            Err(e) => FunctionResponse {
+                name: function_call.name,
+                response: e.to_string().into(),
+            },
         }
     }
 
@@ -138,6 +138,8 @@ pub enum FunctionCallError {
     OutputSerializationFailed(String),
     #[error("Failed to generate input schema: {0}")]
     SchemaGenerationFailed(String),
+    #[error("Missing arguments")]
+    MissingArguments,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -298,6 +300,7 @@ pub struct FunctionCallingConfig {
 
 impl FunctionCallingConfig {
     /// Create a new FunctionCallingConfig with default values.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             mode: None,
@@ -306,12 +309,14 @@ impl FunctionCallingConfig {
     }
 
     /// Set the function calling mode.
+    #[must_use]
     pub fn mode(mut self, mode: Mode) -> Self {
         self.mode = Some(mode);
         self
     }
 
     /// Set the allowed function names.
+    #[must_use]
     pub fn allowed_function_names(mut self, allowed_function_names: Vec<String>) -> Self {
         self.allowed_function_names = Some(allowed_function_names);
         self

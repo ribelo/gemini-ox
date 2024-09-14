@@ -1,151 +1,48 @@
 use futures::{Stream, StreamExt};
-use message::{Content, Contents, FunctionCall, Parts};
+use message::{Content, FunctionCall, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tools::{Tool, ToolBox, ToolConfig};
+use tools::ToolBox;
+use typed_builder::TypedBuilder;
 
 use crate::{ApiRequestError, Gemini, GenerationConfig, SafetyRating, SafetySettings, BASE_URL};
 
 pub mod message;
 pub mod tools;
 
-#[derive(Debug, Serialize)]
-pub struct GenerateContentRequest {
-    contents: Contents,
+#[derive(Debug, Serialize, TypedBuilder)]
+pub struct GenerateContentRequest<'a, 'b> {
+    #[builder(default, setter(transform = |v: impl IntoIterator<Item = impl Into<Content<'a>>>|
+        v.into_iter().map(Into::into).collect::<Vec<_>>()
+    ))]
+    contents: Vec<Content<'a>>,
+    #[builder(default)]
     #[serde(skip_serializing_if = "ToolBox::is_empty")]
     tools: ToolBox,
+    #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     safety_settings: Option<SafetySettings>,
+    #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<Content>,
+    system_instruction: Option<Content<'b>>,
+    #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GenerationConfig>,
+    #[builder(setter(into))]
     model: String,
     #[serde(skip)]
     gemini: Gemini,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum GenerateContentRequestBuilderError {
-    #[error("Content is required for GenerateContentRequest")]
-    MissingContent,
-    #[error("Model is required for GenerateContentRequest")]
-    MissingModel,
-}
-
-#[derive(Debug)]
-pub struct GenerateContentRequestBuilder {
-    contents: Option<Contents>,
-    tools: Option<ToolBox>,
-    tool_config: Option<ToolConfig>,
-    safety_settings: SafetySettings,
-    system_instruction: Option<Content>,
-    generation_config: Option<GenerationConfig>,
-    model: Option<String>,
-    gemini: Gemini,
-}
-
-impl GenerateContentRequestBuilder {
-    #[must_use]
-    pub fn new(gemini: Gemini) -> Self {
-        GenerateContentRequestBuilder {
-            contents: None,
-            tools: None,
-            tool_config: None,
-            safety_settings: SafetySettings::default(),
-            system_instruction: None,
-            generation_config: None,
-            model: None,
-            gemini,
-        }
-    }
-    #[must_use]
-    pub fn with_contents<T: Into<Contents>>(mut self, contents: T) -> Self {
-        self.contents = Some(contents.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
-        let messages = self.contents.take().unwrap_or_default();
-        self.contents = Some(messages.with_content(content));
-        self
-    }
-
-    #[must_use]
-    pub fn with_model<T: Into<String>>(mut self, model: T) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_tools<T: Into<ToolBox>>(mut self, tools: T) -> Self {
-        self.tools = Some(tools.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_tool<T: Tool + 'static>(mut self, tool: T) -> Self {
-        let tools = self.tools.take().unwrap_or_default();
-        tools.add(tool);
-        self.tools = Some(tools);
-        self
-    }
-
-    #[must_use]
-    pub fn with_tool_config<T: Into<ToolConfig>>(mut self, cfg: T) -> Self {
-        self.tool_config = Some(cfg.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_safety_settings(mut self, safety_settings: SafetySettings) -> Self {
-        self.safety_settings = safety_settings;
-        self
-    }
-
-    #[must_use]
-    pub fn with_system_instruction<T: Into<Content>>(mut self, system_instruction: T) -> Self {
-        self.system_instruction = Some(system_instruction.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_generation_config(mut self, generation_config: GenerationConfig) -> Self {
-        self.generation_config = Some(generation_config);
-        self
-    }
-
-    pub fn build(self) -> Result<GenerateContentRequest, GenerateContentRequestBuilderError> {
-        let contents = self
-            .contents
-            .ok_or(GenerateContentRequestBuilderError::MissingContent)?;
-        if contents.is_empty() {
-            return Err(GenerateContentRequestBuilderError::MissingContent);
-        }
-        let model = self
-            .model
-            .ok_or(GenerateContentRequestBuilderError::MissingModel)?;
-        Ok(GenerateContentRequest {
-            contents,
-            tools: self.tools.unwrap_or_default(),
-            safety_settings: Some(self.safety_settings),
-            system_instruction: self.system_instruction,
-            generation_config: self.generation_config,
-            model,
-            gemini: self.gemini,
-        })
-    }
-}
-
 impl Gemini {
-    #[must_use]
-    pub fn generate_content(&self) -> GenerateContentRequestBuilder {
-        GenerateContentRequestBuilder::new(self.clone())
+    pub fn generate_content(
+        &self,
+    ) -> GenerateContentRequestBuilder<'_, '_, ((), (), (), (), (), (), (Gemini,))> {
+        GenerateContentRequest::builder().gemini(self.clone())
     }
 }
 
-impl GenerateContentRequest {
+impl<'a, 'b> GenerateContentRequest<'a, 'b> {
     pub async fn send(&self) -> Result<GenerateContentResponse, ApiRequestError> {
         let url = format!(
             "{}/{}/models/{}:generateContent?key={}",
@@ -175,7 +72,7 @@ impl GenerateContentRequest {
 
     pub async fn stream(
         &self,
-    ) -> impl Stream<Item = Result<GenerateContentResponse, ApiRequestError>> {
+    ) -> impl Stream<Item = Result<GenerateContentResponse<'static>, ApiRequestError>> {
         let url = format!(
             "{}/{}/models/{}:streamGenerateContent?alt=sse&key={}",
             BASE_URL, self.gemini.api_version, self.model, self.gemini.api_key
@@ -211,66 +108,99 @@ impl GenerateContentRequest {
         })
     }
 
-    pub fn add_content<T: Into<Content>>(&mut self, content: T) {
-        self.contents = std::mem::take(&mut self.contents).with_content(content.into());
+    pub fn add_content<T: Into<Content<'a>>>(&mut self, content: T) {
+        self.contents.push(content.into());
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GenerateContentResponse {
-    pub candidates: Vec<ResponseCandidate>,
+pub struct GenerateContentResponse<'a> {
+    pub candidates: Vec<ResponseCandidate<'a>>,
     pub prompt_feedback: Option<PromptFeedback>,
     pub usage_metadata: Option<UsageMetadata>,
 }
 
-impl GenerateContentResponse {
+impl<'a> GenerateContentResponse<'a> {
     #[must_use]
-    pub fn content(&self) -> Option<&Content> {
+    pub fn content(&'a self) -> Option<&'a Content<'a>> {
         self.candidates.first().map(|c| &c.content)
     }
     #[must_use]
     pub fn get_function_calls(&self) -> Vec<&FunctionCall> {
         self.content()
-            .map(|c| c.parts().get_function_calls())
+            .map(|c| {
+                c.parts()
+                    .iter()
+                    .filter_map(|p| p.as_function_call())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     #[must_use]
-    pub async fn invoke_functions(&self, tools: &ToolBox) -> Option<Content> {
+    pub async fn invoke_functions(&'a self, tools: &ToolBox) -> Option<Content<'static>> {
         let function_calls = self.get_function_calls();
         if function_calls.is_empty() {
             return None;
         }
 
-        let mut content = Content::user();
+        let mut content = Content::builder().role(message::Role::User).build();
         for fc in function_calls {
-            let result = tools.invoke(fc.to_owned()).await;
-            content.add_part(result);
+            let result = tools.invoke(fc.clone()).await;
+            content.push(result);
         }
 
         (!content.is_empty()).then_some(content)
     }
 }
 
-impl From<GenerateContentResponse> for Content {
-    fn from(value: GenerateContentResponse) -> Self {
-        let parts: Parts = value.candidates[0].content.parts().clone();
-        Content::Model { parts }
+impl<'a> From<GenerateContentResponse<'a>> for Content<'static> {
+    fn from(value: GenerateContentResponse<'a>) -> Self {
+        let parts = value.candidates[0].content.parts().clone();
+        Content::builder()
+            .role(message::Role::Model)
+            .parts(parts)
+            .build()
+            .to_owned()
     }
 }
 
-impl From<GenerateContentResponse> for Parts {
-    fn from(value: GenerateContentResponse) -> Self {
-        value.candidates[0].content.parts().clone()
+impl<'a> From<GenerateContentResponse<'a>> for Vec<Part<'static>> {
+    fn from(value: GenerateContentResponse<'a>) -> Self {
+        value.candidates[0]
+            .content
+            .parts()
+            .iter()
+            .map(message::Part::to_owned)
+            .collect()
     }
+}
+
+#[derive(
+    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum FinishReason {
+    FinishReasonUnspecified,
+    Stop,
+    MaxTokens,
+    Safety,
+    Recitation,
+    Language,
+    Other,
+    Blocklist,
+    ProhibitedContent,
+    Spii,
+    MalformedFunctionCall,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ResponseCandidate {
-    pub content: Content,
-    pub finish_reason: String,
+pub struct ResponseCandidate<'a> {
+    pub content: Content<'a>,
+    pub finish_reason: FinishReason,
     pub index: u32,
     pub safety_ratings: Option<Vec<SafetyRating>>,
 }
@@ -302,12 +232,16 @@ pub struct UsageMetadata {
 mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
 
+    use crate::ResponseSchema;
+
     use super::*;
     use async_trait::async_trait;
+    use futures::pin_mut;
     use schemars::JsonSchema;
     use serde::Deserialize;
 
     use serde_json::json;
+    use tools::Tool;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::*;
 
@@ -316,29 +250,28 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn get_api_key() -> String {
-        std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set")
+        std::env::var("GOOGLE_AI_API_KEY").expect("GOOGLE_AI_API_KEY must be set")
     }
 
     #[cfg(target_arch = "wasm32")]
     fn get_api_key() -> String {
-        std::env!("GEMINI_API_KEY").to_string()
+        std::env!("GOOGLE_AI_API_KEY").to_string()
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_generate_content_request() {
         let api_key = get_api_key();
-        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
-        let mut stream = Box::pin(
-            gemini
-                .generate_content()
-                .with_content(Content::from("hello"))
-                .with_model("gemini-1.5-flash")
-                .build()
-                .unwrap()
-                .stream()
-                .await,
-        );
+        let gemini = Gemini::builder().api_key(api_key).build();
+        let request = gemini
+            .generate_content()
+            .contents(vec![Content::from("hello")])
+            .model("gemini-1.5-flash")
+            .build();
+
+        let stream = request.stream().await;
+
+        pin_mut!(stream);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -415,26 +348,24 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_function_calling() {
         let api_key = get_api_key();
-        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
+        let gemini = Gemini::builder().api_key(api_key).build();
         let tools = ToolBox::default();
         tools.add(ToolOne);
         tools.add(ToolTwo);
 
-        let res = gemini
+        let request = gemini
             .generate_content()
-            .with_content(Content::from(
+            .contents(vec![Content::from(
                 r#"to finish this test use both "tool_one", "tool_two" tools"#,
-            ))
-            .with_model("gemini-1.5-flash")
-            .with_tools(tools.clone())
-            .build()
-            .unwrap()
-            .send()
-            .await
-            .unwrap();
+            )])
+            .model("gemini-1.5-flash")
+            .tools(tools.clone())
+            .build();
 
-        dbg!(&res);
-        let content = res.invoke_functions(&tools).await;
+        let response = request.send().await.unwrap();
+
+        dbg!(&request);
+        let content = response.invoke_functions(&tools).await;
         dbg!(content);
     }
 
@@ -475,23 +406,23 @@ mod tests {
         }
 
         let api_key = get_api_key();
-        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
-        let config = GenerationConfig::default()
-            .with_response_mime_type("application/json".to_string())
-            .with_response_schema::<Book>();
+        let gemini = Gemini::builder().api_key(api_key).build();
+        dbg!(ResponseSchema::from::<Book>());
+        let config = GenerationConfig::builder()
+            .response_mime_type("application/json".to_string())
+            .response_schema(ResponseSchema::from::<Book>())
+            .build();
 
-        let res = gemini
+        let request = gemini
             .generate_content()
-            .with_content(Content::from(r"Describe Peter Watts Echopraxia book"))
-            .with_model("gemini-1.5-flash")
-            .with_generation_config(config)
-            .build()
-            .unwrap()
-            .send()
-            .await
-            .unwrap();
+            .contents(vec![r"Describe Peter Watts Echopraxia book"])
+            .model("gemini-1.5-flash")
+            .generation_config(config)
+            .build();
 
-        let text = res.candidates[0].content.parts()[0]
+        let response = request.send().await.unwrap();
+
+        let text = response.candidates[0].content.parts()[0]
             .as_text()
             .unwrap()
             .to_string();
@@ -557,7 +488,7 @@ mod tests {
         }
 
         let api_key = get_api_key();
-        let gemini = Gemini::builder().with_api_key(api_key).build().unwrap();
+        let gemini = Gemini::builder().api_key(api_key).build();
 
         let tools = ToolBox::default();
         let test_tool = TestTool::default();
@@ -565,51 +496,49 @@ mod tests {
         let finish_tool = FinishTool::default();
         tools.add(finish_tool.clone());
 
-        let mut contents = Contents::default().with_content(Content::from(
+        let mut contents = vec![Content::from(
             "This is testing environent. To continue this test use [test_tool]",
-        ));
+        )];
 
         let mut i = 0;
         loop {
             if i > 3 {
-                dbg!(contents);
-                dbg!(test_tool);
-                dbg!(finish_tool);
+                dbg!(&contents);
+                dbg!(&test_tool);
+                dbg!(&finish_tool);
                 panic!("Test failed");
             }
             i += 1;
 
-            let res = match gemini
+            let request = gemini
                 .generate_content()
-                .with_contents(contents.clone())
-                .with_model("gemini-1.5-flash")
-                .with_tools(tools.clone())
-                .build()
-                .unwrap()
-                .send()
-                .await
-            {
+                .contents(contents.clone())
+                .model("gemini-1.5-flash")
+                .tools(tools.clone())
+                .build();
+
+            let response = match request.send().await {
                 Ok(res) => res,
                 Err(err) => {
                     println!(
                         "---\n\n{}\n\n---",
                         serde_json::to_string_pretty(&contents).unwrap()
                     );
-                    dbg!(test_tool);
-                    dbg!(finish_tool);
+                    dbg!(&test_tool);
+                    dbg!(&finish_tool);
                     panic!("{err}")
                 }
             };
 
-            contents.add_content(res.clone());
+            contents.push(response.clone().into());
 
-            let tool_results = res.invoke_functions(&tools).await;
+            let tool_results = response.invoke_functions(&tools).await;
             match tool_results {
                 None => {
-                    contents.add_content(Content::from("Follow instructions and use tools!"));
+                    contents.push(Content::from("Follow instructions and use tools!"));
                 }
                 Some(results) => {
-                    contents.add_content(results);
+                    contents.push(results);
                 }
             }
             println!("{}", serde_json::to_string_pretty(&contents).unwrap());
