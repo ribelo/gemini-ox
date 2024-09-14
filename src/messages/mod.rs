@@ -126,6 +126,7 @@ impl<'a> GenerateContentResponse<'a> {
     pub fn content(&'a self) -> Option<&'a Content<'a>> {
         self.candidates.first().map(|c| &c.content)
     }
+
     #[must_use]
     pub fn get_function_calls(&self) -> Vec<&FunctionCall> {
         self.content()
@@ -152,6 +153,18 @@ impl<'a> GenerateContentResponse<'a> {
         }
 
         (!content.is_empty()).then_some(content)
+    }
+
+    pub fn to_owned(&self) -> GenerateContentResponse<'static> {
+        GenerateContentResponse {
+            candidates: self
+                .candidates
+                .iter()
+                .map(ResponseCandidate::to_owned)
+                .collect(),
+            prompt_feedback: self.prompt_feedback.clone(),
+            usage_metadata: self.usage_metadata.clone(),
+        }
     }
 }
 
@@ -203,6 +216,18 @@ pub struct ResponseCandidate<'a> {
     pub finish_reason: FinishReason,
     pub index: u32,
     pub safety_ratings: Option<Vec<SafetyRating>>,
+}
+
+impl<'a> ResponseCandidate<'a> {
+    #[must_use]
+    pub fn to_owned(&self) -> ResponseCandidate<'static> {
+        ResponseCandidate {
+            content: self.content.to_owned(),
+            finish_reason: self.finish_reason.clone(),
+            index: self.index,
+            safety_ratings: self.safety_ratings.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
