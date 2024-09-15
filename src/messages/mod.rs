@@ -191,7 +191,7 @@ impl<'a> From<GenerateContentResponse<'a>> for Vec<Part<'static>> {
 }
 
 #[derive(
-    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, strum::EnumString, strum::Display,
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::Display,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
